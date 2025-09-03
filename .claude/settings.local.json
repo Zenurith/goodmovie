@@ -4,7 +4,9 @@
       "Bash(dir:*)",
       "mcp__ide__executeCode",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(streamlit run:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []
