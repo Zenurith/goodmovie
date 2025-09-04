@@ -1,2 +1,2 @@
-Run ipnyb files at Jupyter Notebook or at VS code(Using venv) first
+pip install -r requirements.txt
 streamlit run app.py
