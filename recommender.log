@@ -1,0 +1,7 @@
+2025-09-04 21:24:04,920 - __main__ - INFO - Searching for movie dataset...
+2025-09-04 21:24:04,921 - __main__ - ERROR - Failed to load dataset: No movie dataset found in expected locations
+2025-09-04 22:04:10,763 - content_based_recommender - INFO - Dataset loaded: dataset/movies.csv
+2025-09-04 22:04:10,763 - content_based_recommender - INFO - Shape: (10000, 9)
+2025-09-04 22:04:10,773 - content_based_recommender - INFO - Using 5 features for similarity computation
+2025-09-04 22:04:10,781 - content_based_recommender - ERROR - Failed to prepare features: could not convert string to float: 'Drama,Crime'
+2025-09-04 22:04:10,781 - content_based_recommender - ERROR - Failed to load dataset: Failed to prepare features: could not convert string to float: 'Drama,Crime'
