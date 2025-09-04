@@ -31,7 +31,20 @@
       "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\reference/**)",
       "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\reference\\movie_recommend/**)",
       "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\reference\\movie_recommend/**)",
-      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)"
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\reference/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)",
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)"
     ],
     "deny": [],
     "ask": []
