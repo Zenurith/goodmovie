@@ -6,6 +6,7 @@ import io
 import json
 import os
 from algorithm import get_recommendations
+from user_manager import get_user_manager
 
 # Page configuration
 st.set_page_config(
@@ -244,20 +245,28 @@ def fetch_poster(movie_id):
         return "https://via.placeholder.com/500x750/333333/ffffff?text=No+Poster"
 
 def load_user_ratings():
-    if os.path.exists('user_ratings.json'):
-        try:
-            with open('user_ratings.json', 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+    """Load ratings for the current logged-in user"""
+    if 'current_user' not in st.session_state or not st.session_state.current_user:
+        return {}
+    
+    user_manager = get_user_manager()
+    return user_manager.get_user_ratings(st.session_state.current_user)
 
 def save_user_ratings(ratings):
-    try:
-        with open('user_ratings.json', 'w') as f:
-            json.dump(ratings, f)
-    except:
-        pass
+    """Save ratings for the current logged-in user"""
+    if 'current_user' not in st.session_state or not st.session_state.current_user:
+        return
+    
+    # This function is kept for compatibility, but individual ratings are saved differently now
+    pass
+
+def save_user_rating(movie_id, rating):
+    """Save a single rating for the current user"""
+    if 'current_user' not in st.session_state or not st.session_state.current_user:
+        return False
+    
+    user_manager = get_user_manager()
+    return user_manager.save_user_rating(st.session_state.current_user, movie_id, rating)
 
 def search_movies(df, search_term):
     if not search_term:
@@ -284,6 +293,77 @@ def collaborative_filtering_recommendations(df, user_ratings, n_recommendations=
         DataFrame with recommended movies
     """
     return get_recommendations(df, user_ratings, n_recommendations)
+
+def show_login_page():
+    """Display login/registration interface"""
+    user_manager = get_user_manager()
+    
+    st.markdown('<div class="top-header">🎬 Good Movie</div>', unsafe_allow_html=True)
+    
+    st.markdown('<div class="search-container">', unsafe_allow_html=True)
+    
+    # Login/Register tabs
+    tab1, tab2 = st.tabs(["Login", "Register"])
+    
+    with tab1:
+        st.markdown("### Welcome Back!")
+        
+        # Show existing users for convenience
+        existing_users = user_manager.get_all_users()
+        if existing_users:
+            st.markdown("**Existing users:**")
+            cols = st.columns(min(len(existing_users), 4))
+            for i, username in enumerate(existing_users[:8]):  # Show up to 8 users
+                with cols[i % 4]:
+                    if st.button(f"Login as {username}", key=f"quick_login_{username}"):
+                        if user_manager.login_user(username):
+                            st.session_state.current_user = username
+                            st.success(f"Welcome back, {username}!")
+                            st.rerun()
+        
+        st.markdown("---")
+        login_username = st.text_input("Username", placeholder="Enter your username", key="login_username")
+        
+        if st.button("Login", type="primary"):
+            if login_username.strip():
+                if user_manager.login_user(login_username):
+                    st.session_state.current_user = login_username.strip().lower()
+                    st.success(f"Welcome back, {login_username}!")
+                    st.rerun()
+                else:
+                    st.error("Username not found. Please register first or check your spelling.")
+            else:
+                st.error("Please enter a username")
+    
+    with tab2:
+        st.markdown("### Create New Account")
+        new_username = st.text_input("Choose Username", placeholder="Enter a unique username", key="register_username")
+        
+        if st.button("Register", type="primary"):
+            if new_username.strip():
+                if len(new_username.strip()) < 2:
+                    st.error("Username must be at least 2 characters long")
+                elif user_manager.create_user(new_username):
+                    st.session_state.current_user = new_username.strip().lower()
+                    st.success(f"Account created! Welcome, {new_username}!")
+                    st.rerun()
+                else:
+                    st.error("Username already exists. Please choose a different username.")
+            else:
+                st.error("Please enter a username")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # System stats
+    stats = user_manager.get_system_stats()
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Users", stats["total_users"])
+    with col2:
+        st.metric("Total Ratings", stats["total_ratings"])
+    with col3:
+        st.metric("Avg Ratings/User", stats["average_ratings_per_user"])
 
 def display_movie_card(movie, clickable=True):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
@@ -441,10 +521,11 @@ def display_movie_modal(movie, df):
     
     # Update rating if changed
     if new_rating != current_rating:
-        user_ratings[movie_id] = new_rating
-        save_user_ratings(user_ratings)
-        st.success(f"Rated {movie['title']}: {new_rating}/10 stars!")
-        st.rerun()
+        if save_user_rating(movie_id, new_rating):
+            st.success(f"Rated {movie['title']}: {new_rating}/10 stars!")
+            st.rerun()
+        else:
+            st.error("Failed to save rating. Please try again.")
     
     # Display current rating
     if current_rating > 0:
@@ -475,8 +556,13 @@ def main():
     # Initialize session state
     if 'show_modal' not in st.session_state:
         st.session_state.show_modal = False
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = None
     
-    
+    # Check if user is logged in
+    if not st.session_state.current_user:
+        show_login_page()
+        return
     
     # Load data
     df = load_movie_data()
@@ -484,6 +570,20 @@ def main():
     if df.empty:
         st.error("No movie data available")
         return
+    
+    # User header with logout
+    user_manager = get_user_manager()
+    user_stats = user_manager.get_user_stats(st.session_state.current_user)
+    
+    header_col1, header_col2 = st.columns([3, 1])
+    with header_col1:
+        st.markdown('<div class="top-header">🎬 Good Movie</div>', unsafe_allow_html=True)
+    with header_col2:
+        st.markdown(f"**Welcome, {st.session_state.current_user}!**")
+        st.caption(f"Rated: {user_stats.get('total_rated', 0)} movies | Avg: {user_stats.get('average_rating', 0.0)}/10")
+        if st.button("Logout", type="secondary"):
+            st.session_state.current_user = None
+            st.rerun()
     
     # Show modal if a movie is selected
     if st.session_state.show_modal and 'selected_movie' in st.session_state:
@@ -608,12 +708,35 @@ def main():
                 with cols4[idx % 4]:
                     display_movie_card(movie, clickable=True)
     else:
-        st.sidebar.title("🎬 My Ratings")
-        if rated_movies:
-            st.sidebar.write(f"You have rated {len(rated_movies)} movies")
+        st.sidebar.title("🎬 My Profile")
+        
+        # User stats
+        user_stats = user_manager.get_user_stats(st.session_state.current_user)
+        if user_stats:
+            st.sidebar.metric("Movies Rated", user_stats.get('total_rated', 0))
+            if user_stats.get('total_rated', 0) > 0:
+                st.sidebar.metric("Average Rating", f"{user_stats.get('average_rating', 0.0)}/10")
+                st.sidebar.write(f"**Highest:** {user_stats.get('highest_rating', 0)}/10")
+                st.sidebar.write(f"**Lowest:** {user_stats.get('lowest_rating', 0)}/10")
             
-            if st.sidebar.button("Clear All Ratings"):
-                save_user_ratings({})
+            st.sidebar.write(f"**Member since:** {user_stats.get('created_at', '')[:10]}")
+        
+        if rated_movies:
+            st.sidebar.markdown("---")
+            st.sidebar.write("**Recent Ratings:**")
+            # Show last 5 ratings
+            recent_ratings = dict(list(load_user_ratings().items())[-5:])
+            for movie_id, rating in recent_ratings.items():
+                movie_row = df[df['id'].astype(str) == str(movie_id)]
+                if not movie_row.empty:
+                    movie_title = movie_row.iloc[0]['title']
+                    st.sidebar.write(f"{'★' * rating} {movie_title[:20]}...")
+            
+            st.sidebar.markdown("---")
+            if st.sidebar.button("Clear All My Ratings"):
+                # Clear ratings for current user
+                for movie_id in list(load_user_ratings().keys()):
+                    user_manager.remove_user_rating(st.session_state.current_user, movie_id)
                 st.rerun()
         else:
             st.sidebar.write("No ratings yet. Click on movies to rate them!")
