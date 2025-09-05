@@ -216,6 +216,49 @@ st.markdown("""
         margin: 0.2rem;
         display: inline-block;
     }
+    
+    .pagination-container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin: 3rem 0;
+        gap: 2rem;
+    }
+    
+    .pagination-button {
+        background-color: #ff4444;
+        color: white;
+        border: none;
+        border-radius: 25px;
+        padding: 12px 24px;
+        font-size: 1rem;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(255, 68, 68, 0.3);
+        text-decoration: none;
+        display: inline-block;
+    }
+    
+    .pagination-button:hover {
+        background-color: #ff6666;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(255, 68, 68, 0.5);
+    }
+    
+    .pagination-button:disabled {
+        background-color: #666;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    
+    .pagination-info {
+        color: #ffffff;
+        font-size: 1.1rem;
+        font-weight: bold;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -231,7 +274,7 @@ def load_movie_data():
 @st.cache_data
 def fetch_poster(movie_id):
     try:
-        url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key=c7ec19ffdd3279641fb606d19ceb9bb1&language=en-US"
+        url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key=d33748abb9bc67b4691fcc92d60d189c&language=en-US"
         response = requests.get(url, timeout=5)
         data = response.json()
         
@@ -293,6 +336,44 @@ def collaborative_filtering_recommendations(df, user_ratings, n_recommendations=
         DataFrame with recommended movies
     """
     return get_recommendations(df, user_ratings, n_recommendations)
+
+def display_pagination_controls(total_items, current_page, items_per_page):
+    """Display pagination controls with Previous/Next buttons"""
+    total_pages = (total_items - 1) // items_per_page + 1
+    
+    if total_pages <= 1:
+        return
+    
+    st.markdown('<div class="pagination-container">', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col1:
+        if current_page > 1:
+            if st.button("◀ Previous", key="prev_page", type="primary"):
+                st.session_state.current_page = current_page - 1
+                st.rerun()
+        else:
+            st.button("◀ Previous", key="prev_page_disabled", disabled=True)
+    
+    with col2:
+        st.markdown(f'<div class="pagination-info">Page {current_page} of {total_pages}</div>', unsafe_allow_html=True)
+    
+    with col3:
+        if current_page < total_pages:
+            if st.button("Next ▶", key="next_page", type="primary"):
+                st.session_state.current_page = current_page + 1
+                st.rerun()
+        else:
+            st.button("Next ▶", key="next_page_disabled", disabled=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def paginate_dataframe(df, page, items_per_page):
+    """Get a subset of dataframe for the current page"""
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    return df.iloc[start_idx:end_idx]
 
 def show_login_page():
     """Display login/registration interface"""
@@ -558,6 +639,10 @@ def main():
         st.session_state.show_modal = False
     if 'current_user' not in st.session_state:
         st.session_state.current_user = None
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 1
+    if 'movies_per_page' not in st.session_state:
+        st.session_state.movies_per_page = 12
     
     # Check if user is logged in
     if not st.session_state.current_user:
@@ -584,6 +669,30 @@ def main():
         if st.button("Logout", type="secondary"):
             st.session_state.current_user = None
             st.rerun()
+        
+        # Delete account option with confirmation
+        if 'confirm_delete' not in st.session_state:
+            st.session_state.confirm_delete = False
+        
+        if not st.session_state.confirm_delete:
+            if st.button("🗑️ Delete Account", type="secondary"):
+                st.session_state.confirm_delete = True
+                st.rerun()
+        else:
+            st.warning("⚠️ This will permanently delete your account and all ratings!")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Yes, Delete", type="primary"):
+                    # Delete the user account
+                    user_manager.delete_user(st.session_state.current_user)
+                    st.session_state.current_user = None
+                    st.session_state.confirm_delete = False
+                    st.success("Account deleted successfully!")
+                    st.rerun()
+            with col2:
+                if st.button("❌ Cancel"):
+                    st.session_state.confirm_delete = False
+                    st.rerun()
     
     # Show modal if a movie is selected
     if st.session_state.show_modal and 'selected_movie' in st.session_state:
@@ -614,49 +723,49 @@ def main():
     # Handle search
     search_results = None
     if search_term or search_button:
+        # Reset to page 1 when new search is made
+        if search_button or ('last_search_term' not in st.session_state or st.session_state.last_search_term != search_term):
+            st.session_state.current_page = 1
+            st.session_state.last_search_term = search_term
+        
         search_results = search_movies(df, search_term)
         
         if not search_results.empty:
             st.markdown(f'<div class="section-header">🔍 Search Results ({len(search_results)} movies found)</div>', unsafe_allow_html=True)
             
+            # Paginate search results
+            paginated_search = paginate_dataframe(search_results, st.session_state.current_page, st.session_state.movies_per_page)
+            
             # Display search results
             search_cols = st.columns(4)
-            for idx, (_, movie) in enumerate(search_results.head(12).iterrows()):
+            for idx, (_, movie) in enumerate(paginated_search.iterrows()):
                 with search_cols[idx % 4]:
                     display_movie_card(movie, clickable=True)
+            
+            # Add pagination controls for search results
+            display_pagination_controls(len(search_results), st.session_state.current_page, st.session_state.movies_per_page)
         else:
             st.warning(f"No movies found for '{search_term}'")
     
     # Only show trending if no search is active
     if not search_term:
-        # Top 10 section
-        st.markdown('<div class="section-header">📈 Trending Today</div>', unsafe_allow_html=True)
+        # Trending Movies section with pagination
+        st.markdown('<div class="section-header">📈 Trending Movies</div>', unsafe_allow_html=True)
         
-        # Sort by vote_average and popularity for top movies
-        top_movies = df.nlargest(10, ['vote_average', 'popularity'])
+        # Sort by vote_average and popularity for all trending movies
+        trending_movies = df.nlargest(100, ['vote_average', 'popularity'])
         
-        # Display in a grid layout (5 columns for top 10)
-        cols = st.columns(5)
-        for idx, (_, movie) in enumerate(top_movies.head(5).iterrows()):
-            with cols[idx]:
+        # Paginate trending movies
+        paginated_trending = paginate_dataframe(trending_movies, st.session_state.current_page, st.session_state.movies_per_page)
+        
+        # Display in a grid layout (4 columns)
+        cols = st.columns(4)
+        for idx, (_, movie) in enumerate(paginated_trending.iterrows()):
+            with cols[idx % 4]:
                 display_movie_card(movie, clickable=True)
         
-        # Second row of top 10
-        cols2 = st.columns(5)
-        for idx, (_, movie) in enumerate(top_movies.tail(5).iterrows()):
-            with cols2[idx]:
-                display_movie_card(movie, clickable=True)
-        
-        # Additional trending section
-        st.markdown('<div class="section-header">🔥 More Trending</div>', unsafe_allow_html=True)
-        
-        # Show more movies in a different layout
-        trending_movies = df.nlargest(20, 'popularity').tail(10)
-        
-        cols3 = st.columns(4)
-        for idx, (_, movie) in enumerate(trending_movies.iterrows()):
-            with cols3[idx % 4]:
-                display_movie_card(movie, clickable=True)
+        # Add pagination controls for trending movies
+        display_pagination_controls(len(trending_movies), st.session_state.current_page, st.session_state.movies_per_page)
     
     # Add recommendations section for users who have rated movies
     user_ratings = load_user_ratings()
@@ -702,11 +811,18 @@ def main():
         if len(filtered_df) != len(df):
             st.markdown('<div class="section-header">🔍 Filtered Results</div>', unsafe_allow_html=True)
             
-            filtered_movies = filtered_df.nlargest(12, ['vote_average', 'popularity'])
+            filtered_movies = filtered_df.nlargest(len(filtered_df), ['vote_average', 'popularity'])
+            
+            # Paginate filtered results
+            paginated_filtered = paginate_dataframe(filtered_movies, st.session_state.current_page, st.session_state.movies_per_page)
+            
             cols4 = st.columns(4)
-            for idx, (_, movie) in enumerate(filtered_movies.iterrows()):
+            for idx, (_, movie) in enumerate(paginated_filtered.iterrows()):
                 with cols4[idx % 4]:
                     display_movie_card(movie, clickable=True)
+            
+            # Add pagination controls for filtered results
+            display_pagination_controls(len(filtered_movies), st.session_state.current_page, st.session_state.movies_per_page)
     else:
         st.sidebar.title("🎬 My Profile")
         
@@ -738,23 +854,10 @@ def main():
                 for movie_id in list(load_user_ratings().keys()):
                     user_manager.remove_user_rating(st.session_state.current_user, movie_id)
                 st.rerun()
+            
         else:
             st.sidebar.write("No ratings yet. Click on movies to rate them!")
     
-    # Footer stats
-    st.markdown("---")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("Total Movies", len(df))
-    with col2:
-        st.metric("Average Rating", f"{df['vote_average'].mean():.1f}")
-    with col3:
-        st.metric("Genres Available", len(all_genres) if 'all_genres' in locals() else 0)
-    with col4:
-        display_results = search_results if search_results is not None else df
-        st.metric("Results Shown", len(display_results))
-    with col5:
-        st.metric("Movies Rated", len(rated_movies))
 
 if __name__ == "__main__":
     main()
