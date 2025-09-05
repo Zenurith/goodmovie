@@ -53,7 +53,9 @@
       "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\algorithm/**)",
       "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app/**)",
       "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
-      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)"
+      "Read(/C:\\Users\\User\\Downloads\\goodmovie\\app\\error/**)",
+      "Bash(grep:*)",
+      "Bash(mv:*)"
     ],
     "deny": [],
     "ask": []

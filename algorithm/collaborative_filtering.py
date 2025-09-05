@@ -1,26 +1,73 @@
-
-
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
+from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 import logging
+import os
+import json
+from functools import lru_cache
 
 
 class CollaborativeFilter:
-
-    
     def __init__(self, df: pd.DataFrame):
-
         self.df = df.copy()
         self.user_ratings = {}
         self.user_item_matrix = None
         self.item_similarity_matrix = None
+        self.svd_model = None
+        self._users_data_cache = None
+        self._similarity_cache = {}
         
     def update_user_ratings(self, user_ratings: Dict[str, int]) -> None:
         """Update the user ratings dictionary."""
         self.user_ratings = user_ratings.copy()
+        # Clear caches when user ratings change
+        self._similarity_cache.clear()
+    
+    def _load_users_data(self, users_file_path: str = None) -> Dict[str, Dict[str, int]]:
+        """Load user rating data from users_data.json file with caching."""
+        # Use cache if available
+        if self._users_data_cache is not None:
+            return self._users_data_cache
+            
+        try:
+            if users_file_path is None:
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                users_file_path = os.path.join(os.path.dirname(current_dir), 'users_data.json')
+            
+            if not os.path.exists(users_file_path):
+                logging.warning(f"Users data file not found: {users_file_path}")
+                return {}
+            
+            with open(users_file_path, 'r', encoding='utf-8') as f:
+                users_data = json.load(f)
+            
+            # Extract ratings data from JSON structure
+            real_users_data = {}
+            
+            if 'users' in users_data:
+                for user_id, user_info in users_data['users'].items():
+                    if 'ratings' in user_info and user_info['ratings']:
+                        # Convert all keys to strings and ensure ratings are integers
+                        user_ratings = {}
+                        for movie_id, rating in user_info['ratings'].items():
+                            user_ratings[str(movie_id)] = int(rating)
+                        
+                        # Only include users with at least one rating
+                        if user_ratings:
+                            real_users_data[str(user_id)] = user_ratings
+            
+            logging.info(f"Loaded ratings data for {len(real_users_data)} users from users_data.json")
+            
+            # Cache the result
+            self._users_data_cache = real_users_data
+            return real_users_data
+            
+        except Exception as e:
+            logging.error(f"Error loading users ratings data: {e}")
+            return {}
     
     def _extract_ratings_from_users_data(self, users_data: Dict) -> Dict[str, Dict[str, int]]:
         """
@@ -64,59 +111,63 @@ class CollaborativeFilter:
         return clean_data
     
     def _build_user_item_matrix(self, all_users_data: Dict[str, Dict[str, int]]) -> pd.DataFrame:
-
+        """Build user-item rating matrix with performance optimizations."""
         # Clean and extract ratings data, handling nested structure
         clean_users_data = self._extract_ratings_from_users_data(all_users_data)
         
-        # Get all unique movie IDs
+        if not clean_users_data:
+            return pd.DataFrame()
+        
+        # Get all unique movie IDs that exist in our dataset
         all_movie_ids = set()
+        movie_id_set = set(self.df['id'].astype(str))  # Pre-convert for faster lookup
+        
         for user_ratings in clean_users_data.values():
             if isinstance(user_ratings, dict):
-                all_movie_ids.update(user_ratings.keys())
+                # Only add movie IDs that exist in our dataset
+                valid_movie_ids = {mid for mid in user_ratings.keys() if mid in movie_id_set}
+                all_movie_ids.update(valid_movie_ids)
         
         all_movie_ids = sorted(list(all_movie_ids))
         
-        # Build matrix
+        if not all_movie_ids:
+            return pd.DataFrame()
+        
+        # Build matrix more efficiently
         matrix_data = []
         user_ids = []
         
         for user_id, ratings in clean_users_data.items():
-            if isinstance(ratings, dict):
+            if isinstance(ratings, dict) and ratings:  # Only include users with ratings
                 user_row = []
                 for movie_id in all_movie_ids:
                     user_row.append(ratings.get(movie_id, 0))  # 0 for unrated movies
                 matrix_data.append(user_row)
                 user_ids.append(user_id)
         
+        if not matrix_data:
+            return pd.DataFrame()
+            
         return pd.DataFrame(matrix_data, index=user_ids, columns=all_movie_ids)
     
-    def _calculate_user_similarity(self, user_item_matrix: pd.DataFrame, target_user: str) -> pd.Series:
+    @lru_cache(maxsize=128)
+    def _calculate_user_similarity(self, user_item_matrix_hash: int, target_user: str) -> pd.Series:
         """
-        Calculate similarity between target user and all other users.
-        
-        Args:
-            user_item_matrix: User-item rating matrix
-            target_user: ID of target user
-            
-        Returns:
-            Series of similarity scores
+        Calculate similarity between target user and all other users with caching.
         """
-        if target_user not in user_item_matrix.index:
+        if target_user not in self.user_item_matrix.index:
             return pd.Series(dtype=float)
         
-        target_ratings = user_item_matrix.loc[target_user].values.reshape(1, -1)
+        target_ratings = self.user_item_matrix.loc[target_user].values.reshape(1, -1)
         
         # Calculate cosine similarity with all users
-        similarities = cosine_similarity(target_ratings, user_item_matrix.values)[0]
+        similarities = cosine_similarity(target_ratings, self.user_item_matrix.values)[0]
         
-        return pd.Series(similarities, index=user_item_matrix.index)
+        return pd.Series(similarities, index=self.user_item_matrix.index)
     
     def _build_item_similarity_matrix(self) -> np.ndarray:
         """
-        Build item-item similarity matrix based on content features.
-        
-        Returns:
-            Item similarity matrix
+        Build item-item similarity matrix based on content features with improvements.
         """
         try:
             # Create content features for movies
@@ -133,7 +184,6 @@ class CollaborativeFilter:
                 rating_bucket = f"rating_{int(rating)}" if rating > 0 else ""
                 
                 popularity = float(movie.get('popularity', 0))
-                pop_bucket = ""
                 if popularity > 80:
                     pop_bucket = "very_popular"
                 elif popularity > 40:
@@ -143,14 +193,19 @@ class CollaborativeFilter:
                 else:
                     pop_bucket = "niche"
                 
-                feature_text = f"{genres} {rating_bucket} {pop_bucket}"
+                # Add language and year if available
+                language = str(movie.get('original_language', ''))
+                
+                feature_text = f"{genres} {rating_bucket} {pop_bucket} {language}"
                 feature_texts.append(feature_text.strip())
             
-            # Create TF-IDF vectors
+            # Create TF-IDF vectors with improved parameters
             vectorizer = TfidfVectorizer(
                 stop_words='english',
-                max_features=1000,
-                ngram_range=(1, 2)
+                max_features=2000,  # Increased for better feature representation
+                ngram_range=(1, 2),
+                min_df=2,  # Ignore terms that appear in less than 2 documents
+                max_df=0.8  # Ignore terms that appear in more than 80% of documents
             )
             
             tfidf_matrix = vectorizer.fit_transform(feature_texts)
@@ -164,28 +219,59 @@ class CollaborativeFilter:
             logging.error(f"Error building item similarity matrix: {e}")
             return np.eye(len(self.df))  # Return identity matrix as fallback
     
+    def _build_svd_model(self, user_item_matrix: pd.DataFrame, n_components: int = 50):
+        """Build SVD model with improved handling."""
+        try:
+            if user_item_matrix.empty:
+                return False
+                
+            # Replace 0s with NaN for missing values
+            matrix_filled = user_item_matrix.copy()
+            matrix_filled = matrix_filled.replace(0, np.nan)
+            
+            # Fill NaN with user means, then global mean
+            for user_id in matrix_filled.index:
+                user_mean = matrix_filled.loc[user_id].mean()
+                if np.isnan(user_mean):
+                    user_mean = matrix_filled.stack().mean()  # Global mean
+                matrix_filled.loc[user_id] = matrix_filled.loc[user_id].fillna(user_mean)
+            
+            # Determine appropriate number of components
+            min_dim = min(matrix_filled.shape[0], matrix_filled.shape[1])
+            n_components = min(n_components, min_dim - 1, 20)
+            
+            if n_components < 2:
+                return False
+                
+            # Apply SVD
+            self.svd_model = TruncatedSVD(n_components=n_components, random_state=42)
+            self.svd_model.fit(matrix_filled.fillna(0))
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error building SVD model: {e}")
+            return False
+    
     def get_recommendations(self, n_recommendations: int = 5, 
                           all_users_data: Optional[Dict[str, Dict[str, int]]] = None) -> pd.DataFrame:
         """
-        Generate movie recommendations using collaborative filtering.
-        
-        Args:
-            n_recommendations: Number of recommendations to return
-            all_users_data: Dictionary of all users' ratings for collaborative filtering
-            
-        Returns:
-            DataFrame containing recommended movies
+        Generate movie recommendations using improved hybrid collaborative filtering.
         """
         try:
             # Validate input
             valid_ratings = {k: v for k, v in self.user_ratings.items() if v > 0 and v <= 10}
             
-            if not valid_ratings or len(valid_ratings) < 2:
+            if not valid_ratings or len(valid_ratings) < 1:
                 return self._get_content_based_recommendations(n_recommendations)
+            
+            # Load user data if not provided
+            if not all_users_data:
+                all_users_data = self._load_users_data()
             
             # If we have multiple users' data, use collaborative filtering
             if all_users_data and len(all_users_data) > 1:
-                return self._get_collaborative_recommendations(n_recommendations, all_users_data)
+                return self._get_hybrid_recommendations(n_recommendations, all_users_data)
             else:
                 # Fall back to improved content-based recommendations
                 return self._get_content_based_recommendations(n_recommendations)
@@ -194,10 +280,10 @@ class CollaborativeFilter:
             logging.error(f"Error in get_recommendations: {e}")
             return self._get_fallback_recommendations(n_recommendations)
     
-    def _get_collaborative_recommendations(self, n_recommendations: int, 
-                                         all_users_data: Dict[str, Dict[str, int]]) -> pd.DataFrame:
+    def _get_hybrid_recommendations(self, n_recommendations: int, 
+                                   all_users_data: Dict[str, Dict[str, int]]) -> pd.DataFrame:
         """
-        Get recommendations using user-based collaborative filtering.
+        Get recommendations using hybrid approach combining multiple methods.
         """
         try:
             # Add current user to the data
@@ -206,19 +292,61 @@ class CollaborativeFilter:
             all_users_with_current[current_user_id] = self.user_ratings
             
             # Build user-item matrix
-            user_item_matrix = self._build_user_item_matrix(all_users_with_current)
+            self.user_item_matrix = self._build_user_item_matrix(all_users_with_current)
+            
+            if self.user_item_matrix.empty or current_user_id not in self.user_item_matrix.index:
+                return self._get_content_based_recommendations(n_recommendations)
+            
+            # Build SVD model
+            svd_built = self._build_svd_model(self.user_item_matrix)
+            
+            # Method 1: User-based collaborative filtering
+            user_cf_recs = self._get_user_based_recommendations(n_recommendations, all_users_data)
+            
+            # Method 2: Item-based collaborative filtering
+            item_cf_recs = self._get_item_based_recommendations(n_recommendations)
+            
+            # Method 3: SVD-based recommendations
+            svd_recs = pd.DataFrame()
+            if svd_built:
+                svd_recs = self._get_svd_recommendations(n_recommendations)
+            
+            # Method 4: Content-based recommendations
+            content_recs = self._get_content_based_recommendations(n_recommendations)
+            
+            # Combine and rank recommendations
+            combined_recs = self._combine_recommendations([
+                (user_cf_recs, 0.4),      # Highest weight for user-based CF
+                (item_cf_recs, 0.3),      # Second highest for item-based CF
+                (svd_recs, 0.2),          # Medium weight for SVD
+                (content_recs, 0.1)       # Lowest weight for content-based
+            ], n_recommendations)
+            
+            return combined_recs if not combined_recs.empty else self._get_fallback_recommendations(n_recommendations)
+            
+        except Exception as e:
+            logging.error(f"Error in hybrid recommendations: {e}")
+            return self._get_content_based_recommendations(n_recommendations)
+    
+    def _get_user_based_recommendations(self, n_recommendations: int, 
+                                       all_users_data: Dict[str, Dict[str, int]]) -> pd.DataFrame:
+        """
+        Get recommendations using user-based collaborative filtering.
+        """
+        try:
+            current_user_id = "current_user"
             
             # Calculate user similarities
-            user_similarities = self._calculate_user_similarity(user_item_matrix, current_user_id)
+            matrix_hash = hash(str(self.user_item_matrix.values.tobytes()))
+            user_similarities = self._calculate_user_similarity(matrix_hash, current_user_id)
             
-            # Find most similar users (excluding current user) - increased count and lowered threshold
-            similar_users = user_similarities.drop(current_user_id).nlargest(10)
+            # Find most similar users (excluding current user)
+            similar_users = user_similarities.drop(current_user_id, errors='ignore').nlargest(15)
             
-            if similar_users.empty or similar_users.max() < 0.05:  # Lowered threshold from 0.1 to 0.05
-                # No similar users found, use item-based collaborative filtering
-                return self._get_item_based_recommendations(n_recommendations)
+            if similar_users.empty or similar_users.max() < 0.02:  # Very low threshold
+                return pd.DataFrame()
             
-            # Get movie recommendations from similar users using reference approach
+            # Get movie recommendations from similar users
             movie_scores = {}
             rated_movies = set(self.user_ratings.keys())
             
@@ -226,70 +354,60 @@ class CollaborativeFilter:
             clean_all_users_data = self._extract_ratings_from_users_data(all_users_data)
             
             for similar_user, similarity_score in similar_users.items():
-                if similarity_score < 0.05:  # Lowered threshold
+                if similarity_score < 0.02:  # Very low threshold
                     continue
                 
                 if similar_user not in clean_all_users_data:
                     continue
+                    
                 user_ratings = clean_all_users_data[similar_user]
                 
                 for movie_id, rating in user_ratings.items():
-                    if movie_id not in rated_movies and rating >= 6:  # Lowered from 7 to 6 to include more movies
+                    if movie_id not in rated_movies and rating >= 6:
                         if movie_id not in movie_scores:
                             movie_scores[movie_id] = 0
-                        # Use reference-style scoring: similarity * (rating - average_rating)
-                        user_avg = np.mean(list(self.user_ratings.values())) if self.user_ratings else 5.0
-                        score_contribution = similarity_score * (rating - user_avg)
+                        # Improved scoring with bias correction
+                        user_avg = np.mean(list(self.user_ratings.values()))
+                        similar_user_avg = np.mean(list(user_ratings.values()))
+                        bias_corrected_rating = rating - similar_user_avg + user_avg
+                        score_contribution = similarity_score * bias_corrected_rating
                         movie_scores[movie_id] += score_contribution
             
             # Sort and get top recommendations
             if not movie_scores:
-                return self._get_item_based_recommendations(n_recommendations)
+                return pd.DataFrame()
             
             sorted_movies = sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)
             
             # Get movie data for recommendations
             recommended_movies = []
-            for movie_id, score in sorted_movies[:n_recommendations * 2]:  # Get more candidates
+            for movie_id, score in sorted_movies[:n_recommendations * 2]:
                 movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
                 if not movie_row.empty:
-                    recommended_movies.append(movie_row.iloc[0].to_dict())
+                    movie_dict = movie_row.iloc[0].to_dict()
+                    movie_dict['cf_score'] = score
+                    recommended_movies.append(movie_dict)
             
             result_df = pd.DataFrame(recommended_movies)
             
-            # Filter by quality to ensure good recommendations
+            # Filter by quality
             if not result_df.empty:
-                result_df = result_df[result_df['vote_average'] >= 6.0]  # Ensure minimum quality
+                result_df = result_df[result_df['vote_average'] >= 6.0]
                 result_df = result_df.head(n_recommendations)
             
-            # If we don't have enough, supplement with item-based
-            if len(result_df) < n_recommendations:
-                remaining = n_recommendations - len(result_df)
-                item_recs = self._get_item_based_recommendations(remaining)
-                
-                # Avoid duplicates
-                existing_ids = set(result_df['id'].astype(str)) if not result_df.empty else set()
-                new_recs = item_recs[~item_recs['id'].astype(str).isin(existing_ids)]
-                
-                if not new_recs.empty:
-                    if result_df.empty:
-                        result_df = new_recs.head(remaining)
-                    else:
-                        result_df = pd.concat([result_df, new_recs.head(remaining)], ignore_index=True)
-            
-            return result_df.head(n_recommendations) if not result_df.empty else self._get_fallback_recommendations(n_recommendations)
+            return result_df
             
         except Exception as e:
-            logging.error(f"Error in collaborative recommendations: {e}")
-            return self._get_item_based_recommendations(n_recommendations)
+            logging.error(f"Error in user-based recommendations: {e}")
+            return pd.DataFrame()
     
     def _get_item_based_recommendations(self, n_recommendations: int) -> pd.DataFrame:
         """
-        Get recommendations using item-based collaborative filtering (like the reference).
+        Get recommendations using item-based collaborative filtering.
         """
         try:
             if not self.user_ratings:
-                return self._get_fallback_recommendations(n_recommendations)
+                return pd.DataFrame()
             
             # Build item similarity matrix if not already built
             if self.item_similarity_matrix is None:
@@ -301,22 +419,19 @@ class CollaborativeFilter:
             unrated_movie_ids = [mid for mid in all_movie_ids if mid not in rated_movie_ids]
             
             if not unrated_movie_ids:
-                return self._get_fallback_recommendations(n_recommendations)
+                return pd.DataFrame()
             
-            # Calculate scores for unrated movies using reference approach
+            # Calculate scores for unrated movies
             movie_scores = []
             
             for unrated_movie_id in unrated_movie_ids:
                 score = 0.0
+                weight_sum = 0.0
                 
                 # Find this movie's index in the dataset
-                movie_idx = None
-                for idx, movie_id in enumerate(all_movie_ids):
-                    if movie_id == unrated_movie_id:
-                        movie_idx = idx
-                        break
-                
-                if movie_idx is None:
+                try:
+                    movie_idx = all_movie_ids.index(unrated_movie_id)
+                except ValueError:
                     continue
                 
                 # Calculate score based on similarity to rated movies
@@ -324,35 +439,34 @@ class CollaborativeFilter:
                     if rating <= 0:
                         continue
                     
-                    # Find rated movie index
-                    rated_idx = None
-                    for idx, movie_id in enumerate(all_movie_ids):
-                        if movie_id == rated_movie_id:
-                            rated_idx = idx
-                            break
-                    
-                    if rated_idx is None or rated_idx >= len(self.item_similarity_matrix):
+                    try:
+                        rated_idx = all_movie_ids.index(rated_movie_id)
+                    except ValueError:
                         continue
                     
-                    # Get similarity score
-                    if movie_idx < len(self.item_similarity_matrix[rated_idx]):
+                    if rated_idx < len(self.item_similarity_matrix) and movie_idx < len(self.item_similarity_matrix[rated_idx]):
                         similarity = self.item_similarity_matrix[rated_idx][movie_idx]
-                        # Use reference-style scoring: similarity * (rating - neutral_rating)
-                        user_avg = np.mean(list(self.user_ratings.values()))
-                        score += similarity * (rating - user_avg)
+                        if similarity > 0.1:  # Only consider reasonably similar items
+                            user_avg = np.mean(list(self.user_ratings.values()))
+                            score += similarity * (rating - user_avg)
+                            weight_sum += similarity
                 
-                movie_scores.append((unrated_movie_id, score))
+                if weight_sum > 0:
+                    normalized_score = score / weight_sum
+                    movie_scores.append((unrated_movie_id, normalized_score))
             
             # Sort by score and get top recommendations
             movie_scores.sort(key=lambda x: x[1], reverse=True)
             
             # Get movie data for top recommendations
             recommended_movies = []
-            for movie_id, score in movie_scores[:n_recommendations * 2]:  # Get more candidates
-                if score > 0:  # Only positive scores
+            for movie_id, score in movie_scores[:n_recommendations * 2]:
+                if score > 0:
                     movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
                     if not movie_row.empty:
-                        recommended_movies.append(movie_row.iloc[0].to_dict())
+                        movie_dict = movie_row.iloc[0].to_dict()
+                        movie_dict['item_score'] = score
+                        recommended_movies.append(movie_dict)
             
             result_df = pd.DataFrame(recommended_movies)
             
@@ -361,20 +475,65 @@ class CollaborativeFilter:
                 result_df = result_df[result_df['vote_average'] >= 6.0]
                 result_df = result_df.head(n_recommendations)
             
-            if result_df.empty:
-                return self._get_content_based_recommendations(n_recommendations)
-            
             return result_df
             
         except Exception as e:
             logging.error(f"Error in item-based recommendations: {e}")
-            return self._get_content_based_recommendations(n_recommendations)
+            return pd.DataFrame()
+    
+    def _get_svd_recommendations(self, n_recommendations: int) -> pd.DataFrame:
+        """
+        Get recommendations using SVD matrix factorization.
+        """
+        try:
+            if self.svd_model is None or self.user_item_matrix.empty:
+                return pd.DataFrame()
+                
+            current_user_id = "current_user"
+            if current_user_id not in self.user_item_matrix.index:
+                return pd.DataFrame()
+            
+            # Get user vector and predict ratings
+            user_vector = self.user_item_matrix.loc[current_user_id].values.reshape(1, -1)
+            user_latent = self.svd_model.transform(user_vector)
+            reconstructed = self.svd_model.inverse_transform(user_latent)[0]
+            
+            # Get unrated movies and their predicted ratings
+            movie_predictions = []
+            rated_movie_ids = set(self.user_ratings.keys())
+            
+            for i, movie_id in enumerate(self.user_item_matrix.columns):
+                if movie_id not in rated_movie_ids and i < len(reconstructed):
+                    predicted_rating = reconstructed[i]
+                    if predicted_rating > 6.0:
+                        movie_predictions.append((movie_id, predicted_rating))
+            
+            # Sort by predicted rating
+            movie_predictions.sort(key=lambda x: x[1], reverse=True)
+            
+            # Get movie data for recommendations
+            recommended_movies = []
+            for movie_id, pred_rating in movie_predictions[:n_recommendations]:
+                movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
+                if not movie_row.empty:
+                    movie_dict = movie_row.iloc[0].to_dict()
+                    movie_dict['svd_score'] = pred_rating
+                    recommended_movies.append(movie_dict)
+            
+            return pd.DataFrame(recommended_movies)
+            
+        except Exception as e:
+            logging.error(f"Error in SVD recommendations: {e}")
+            return pd.DataFrame()
     
     def _get_content_based_recommendations(self, n_recommendations: int) -> pd.DataFrame:
         """
         Get recommendations using improved content-based filtering.
         """
         try:
+            if not self.user_ratings:
+                return self._get_fallback_recommendations(n_recommendations)
+                
             # Analyze user preferences
             user_avg_rating = np.mean(list(self.user_ratings.values()))
             high_rated_movies = {k: v for k, v in self.user_ratings.items() if v >= max(7, user_avg_rating)}
@@ -382,53 +541,65 @@ class CollaborativeFilter:
             if not high_rated_movies:
                 return self._get_fallback_recommendations(n_recommendations)
             
-            # Extract preferred genres
+            # Extract preferred genres and their weights
             genre_scores = {}
+            language_scores = {}
+            
             for movie_id, rating in high_rated_movies.items():
                 movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
                 if not movie_row.empty:
-                    genres = str(movie_row.iloc[0]['genre']).split(',')
+                    movie = movie_row.iloc[0]
+                    
+                    # Genre preferences
+                    genres = str(movie['genre']).split(',')
                     for genre in genres:
                         genre = genre.strip()
                         if genre:
                             genre_scores[genre] = genre_scores.get(genre, 0) + rating
+                    
+                    # Language preferences
+                    language = str(movie.get('original_language', ''))
+                    if language:
+                        language_scores[language] = language_scores.get(language, 0) + rating
             
-            # Get top genres
-            top_genres = sorted(genre_scores.keys(), key=lambda g: genre_scores[g], reverse=True)[:3]
+            # Get top preferences
+            top_genres = sorted(genre_scores.keys(), key=lambda g: genre_scores[g], reverse=True)[:5]
+            top_languages = sorted(language_scores.keys(), key=lambda l: language_scores[l], reverse=True)[:3]
             
             if not top_genres:
                 return self._get_fallback_recommendations(n_recommendations)
             
-            # Find unrated movies
+            # Find unrated movies and score them
             rated_movie_ids = set(str(k) for k in self.user_ratings.keys())
             unrated_movies = self.df[~self.df['id'].astype(str).isin(rated_movie_ids)].copy()
             
-            # Score unrated movies
             movie_scores = []
             for _, movie in unrated_movies.iterrows():
-                score = self._calculate_simple_content_score(movie, top_genres, genre_scores, user_avg_rating)
+                score = self._calculate_content_score(movie, top_genres, top_languages, genre_scores, language_scores, user_avg_rating)
                 if score > 0:
-                    movie_scores.append((movie.to_dict(), score))
+                    movie_dict = movie.to_dict()
+                    movie_dict['content_score'] = score
+                    movie_scores.append(movie_dict)
             
             # Sort and return top recommendations
-            movie_scores.sort(key=lambda x: x[1], reverse=True)
-            recommended_movies = [movie for movie, score in movie_scores[:n_recommendations]]
+            movie_scores.sort(key=lambda x: x['content_score'], reverse=True)
             
-            return pd.DataFrame(recommended_movies)
+            return pd.DataFrame(movie_scores[:n_recommendations])
             
         except Exception as e:
             logging.error(f"Error in content-based recommendations: {e}")
             return self._get_fallback_recommendations(n_recommendations)
     
-    def _calculate_simple_content_score(self, movie: pd.Series, top_genres: List[str], 
-                                      genre_scores: Dict[str, float], user_avg_rating: float) -> float:
+    def _calculate_content_score(self, movie: pd.Series, top_genres: List[str], top_languages: List[str],
+                               genre_scores: Dict[str, float], language_scores: Dict[str, float], user_avg_rating: float) -> float:
         """
-        Calculate a simpler, more effective content-based score.
+        Calculate improved content-based score.
         """
         try:
-            # Get movie genres
+            # Get movie genres and language
             movie_genres = str(movie['genre']).split(',')
             movie_genres = [g.strip() for g in movie_genres if g.strip()]
+            movie_language = str(movie.get('original_language', ''))
             
             if not movie_genres:
                 return 0.0
@@ -442,46 +613,113 @@ class CollaborativeFilter:
             if genre_match_score == 0:
                 return 0.0  # No genre match
             
-            # Quality score
+            # Language bonus
+            language_bonus = 0.0
+            if movie_language in language_scores:
+                language_bonus = language_scores[movie_language] / 20.0  # Smaller weight
+            
+            # Quality scores
             vote_avg = float(movie.get('vote_average', 0))
             quality_score = vote_avg / 10.0
             
-            # Popularity score (capped)
-            popularity = min(float(movie.get('popularity', 0)) / 50.0, 1.0)
+            # Popularity score (capped and normalized)
+            popularity = float(movie.get('popularity', 0))
+            popularity_score = min(popularity / 100.0, 1.0) * 0.3
+            
+            # Vote count bonus (prefer movies with more votes)
+            vote_count = float(movie.get('vote_count', 0))
+            vote_count_bonus = min(vote_count / 1000.0, 1.0) * 0.2
             
             # Rating alignment bonus
             rating_bonus = 0.5 if vote_avg >= user_avg_rating else 0.0
             
             # Final score
-            total_score = genre_match_score + quality_score + popularity * 0.3 + rating_bonus
+            total_score = (genre_match_score + language_bonus + quality_score + 
+                          popularity_score + vote_count_bonus + rating_bonus)
             
             return total_score
             
         except Exception:
             return 0.0
     
-    def _get_fallback_recommendations(self, n_recommendations: int) -> pd.DataFrame:
-        """Get fallback recommendations when main algorithm fails."""
+    def _combine_recommendations(self, rec_sources: List[tuple], n_recommendations: int) -> pd.DataFrame:
+        """
+        Combine recommendations from multiple sources with weighted scoring.
+        """
         try:
-            return self.df.nlargest(n_recommendations, ['vote_average', 'popularity'])
+            movie_scores = {}
+            movie_data = {}
+            
+            for recs_df, weight in rec_sources:
+                if recs_df.empty:
+                    continue
+                    
+                for _, movie in recs_df.iterrows():
+                    movie_id = str(movie['id'])
+                    
+                    # Store movie data
+                    if movie_id not in movie_data:
+                        movie_data[movie_id] = movie.to_dict()
+                    
+                    # Calculate weighted score
+                    base_score = movie.get('vote_average', 5.0) / 10.0
+                    
+                    # Add method-specific scores if available
+                    method_score = 0
+                    if 'cf_score' in movie:
+                        method_score = movie['cf_score']
+                    elif 'item_score' in movie:
+                        method_score = movie['item_score'] * 5  # Scale up item scores
+                    elif 'svd_score' in movie:
+                        method_score = movie['svd_score']
+                    elif 'content_score' in movie:
+                        method_score = movie['content_score'] * 2  # Scale up content scores
+                    
+                    combined_score = (base_score + method_score) * weight
+                    
+                    if movie_id not in movie_scores:
+                        movie_scores[movie_id] = 0
+                    movie_scores[movie_id] += combined_score
+            
+            # Sort by combined score
+            sorted_movies = sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)
+            
+            # Create result DataFrame
+            recommended_movies = []
+            for movie_id, score in sorted_movies[:n_recommendations]:
+                if movie_id in movie_data:
+                    movie_dict = movie_data[movie_id].copy()
+                    movie_dict['combined_score'] = score
+                    recommended_movies.append(movie_dict)
+            
+            return pd.DataFrame(recommended_movies)
+            
+        except Exception as e:
+            logging.error(f"Error combining recommendations: {e}")
+            return pd.DataFrame()
+    
+    def _get_fallback_recommendations(self, n_recommendations: int) -> pd.DataFrame:
+        """Get high-quality popular movies as fallback."""
+        try:
+            return self.df[
+                (self.df['vote_average'] >= 7.5) & 
+                (self.df['vote_count'] >= 1000)
+            ].nlargest(n_recommendations, ['vote_average', 'popularity'])
         except Exception:
             return self.df.head(n_recommendations)
     
     def predict_rating(self, movie_id: str, all_users_data: Optional[Dict[str, Dict[str, int]]] = None) -> float:
         """
-        Predict rating for a specific movie.
-        
-        Args:
-            movie_id: ID of movie to predict rating for
-            all_users_data: Dictionary of all users' ratings for collaborative filtering
-            
-        Returns:
-            Predicted rating (1-10 scale)
+        Predict rating for a specific movie using hybrid approach.
         """
         try:
             # If movie already rated, return actual rating
             if movie_id in self.user_ratings:
                 return float(self.user_ratings[movie_id])
+            
+            # Load user data if not provided
+            if not all_users_data:
+                all_users_data = self._load_users_data()
             
             # Get movie data
             movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
@@ -490,43 +728,56 @@ class CollaborativeFilter:
                 
             movie = movie_row.iloc[0]
             
-            # Try collaborative filtering first
+            predictions = []
+            weights = []
+            
+            # Try collaborative filtering prediction
             if all_users_data and len(all_users_data) > 1:
                 collab_rating = self._predict_collaborative_rating(movie_id, all_users_data)
                 if collab_rating > 0:
-                    # Add confidence-based adjustment
                     confidence = self._get_prediction_confidence(movie_id, all_users_data)
-                    if confidence < 0.3:  # Low confidence, be more conservative
-                        if collab_rating >= 7.0:
-                            collab_rating = collab_rating * 0.9
-                    return collab_rating
+                    predictions.append(collab_rating)
+                    weights.append(confidence * 0.7)  # Higher weight for collaborative
             
-            # Fall back to content-based prediction
+            # Content-based prediction
             content_rating = self._predict_content_based_rating(movie)
-            # Content-based is less reliable, be more conservative
-            if content_rating >= 7.0:
-                content_rating = content_rating * 0.95
-            return content_rating
+            predictions.append(content_rating)
+            weights.append(0.3)  # Lower weight for content-based
+            
+            # Weighted average
+            if weights:
+                final_rating = sum(p * w for p, w in zip(predictions, weights)) / sum(weights)
+                return max(1.0, min(10.0, final_rating))
+            
+            return 5.0
             
         except Exception as e:
             logging.error(f"Error predicting rating for movie {movie_id}: {e}")
-            return 5.0  # Default neutral rating
+            return 5.0
     
     def _predict_collaborative_rating(self, movie_id: str, all_users_data: Dict[str, Dict[str, int]]) -> float:
         """
         Predict rating using collaborative filtering.
         """
         try:
-            # Build user-item matrix
-            current_user_id = "current_user"
-            all_users_with_current = all_users_data.copy()
-            all_users_with_current[current_user_id] = self.user_ratings
+            # Build user-item matrix if needed
+            if self.user_item_matrix is None:
+                current_user_id = "current_user"
+                all_users_with_current = all_users_data.copy()
+                all_users_with_current[current_user_id] = self.user_ratings
+                self.user_item_matrix = self._build_user_item_matrix(all_users_with_current)
             
-            user_item_matrix = self._build_user_item_matrix(all_users_with_current)
+            if self.user_item_matrix.empty:
+                return 0.0
+                
+            current_user_id = "current_user"
+            if current_user_id not in self.user_item_matrix.index:
+                return 0.0
             
             # Calculate user similarities
-            user_similarities = self._calculate_user_similarity(user_item_matrix, current_user_id)
-            similar_users = user_similarities.drop(current_user_id).nlargest(15)  # Consider more users
+            matrix_hash = hash(str(self.user_item_matrix.values.tobytes()))
+            user_similarities = self._calculate_user_similarity(matrix_hash, current_user_id)
+            similar_users = user_similarities.drop(current_user_id, errors='ignore').nlargest(20)
             
             if similar_users.empty:
                 return 0.0
@@ -535,25 +786,24 @@ class CollaborativeFilter:
             weighted_sum = 0.0
             similarity_sum = 0.0
             
-            # Get clean user ratings data
             clean_all_users_data = self._extract_ratings_from_users_data(all_users_data)
             
             for similar_user, similarity_score in similar_users.items():
-                if similarity_score > 0.05 and similar_user in clean_all_users_data and movie_id in clean_all_users_data[similar_user]:  # Lowered threshold
+                if (similarity_score > 0.02 and similar_user in clean_all_users_data and 
+                    movie_id in clean_all_users_data[similar_user]):
+                    
                     user_rating = clean_all_users_data[similar_user][movie_id]
-                    # Use linear weighting instead of exponential to be less aggressive
                     weight = similarity_score
                     weighted_sum += weight * user_rating
                     similarity_sum += weight
             
             if similarity_sum > 0:
                 predicted_rating = weighted_sum / similarity_sum
-                # Minimal bias adjustment - trust the collaborative prediction more
+                # Bias adjustment
                 user_avg = np.mean(list(self.user_ratings.values())) if self.user_ratings else 5.0
-                global_avg = 6.0  # Assume global average
-                bias_adjusted = predicted_rating + (user_avg - global_avg) * 0.1  # Reduced bias influence
+                global_avg = 6.0
+                bias_adjusted = predicted_rating + (user_avg - global_avg) * 0.05
                 
-                # Remove overly conservative adjustment - trust the algorithm
                 return max(1.0, min(10.0, bias_adjusted))
             
             return 0.0
@@ -564,47 +814,45 @@ class CollaborativeFilter:
     def _get_prediction_confidence(self, movie_id: str, all_users_data: Dict[str, Dict[str, int]]) -> float:
         """
         Calculate confidence score for a prediction (0-1 scale).
-        Higher confidence = more reliable prediction.
         """
         try:
-            # Build user-item matrix
+            if self.user_item_matrix is None or self.user_item_matrix.empty:
+                return 0.2
+                
             current_user_id = "current_user"
-            all_users_with_current = all_users_data.copy()
-            all_users_with_current[current_user_id] = self.user_ratings
+            matrix_hash = hash(str(self.user_item_matrix.values.tobytes()))
+            user_similarities = self._calculate_user_similarity(matrix_hash, current_user_id)
+            similar_users = user_similarities.drop(current_user_id, errors='ignore').nlargest(15)
             
-            user_item_matrix = self._build_user_item_matrix(all_users_with_current)
-            user_similarities = self._calculate_user_similarity(user_item_matrix, current_user_id)
-            similar_users = user_similarities.drop(current_user_id).nlargest(10)
-            
-            # Factors that increase confidence:
             confidence_factors = []
             
-            # 1. Number of similar users who rated this movie
+            # Number of similar users who rated this movie
             users_who_rated = 0
             total_similarity = 0
             clean_all_users_data = self._extract_ratings_from_users_data(all_users_data)
+            
             for user, sim_score in similar_users.items():
-                if sim_score > 0.1 and user in clean_all_users_data and movie_id in clean_all_users_data[user]:
+                if sim_score > 0.05 and user in clean_all_users_data and movie_id in clean_all_users_data[user]:
                     users_who_rated += 1
                     total_similarity += sim_score
             
-            # Confidence from number of raters (0-0.4)
-            rater_confidence = min(users_who_rated / 5.0, 0.4)
+            # Confidence from number of raters
+            rater_confidence = min(users_who_rated / 8.0, 0.4)
             confidence_factors.append(rater_confidence)
             
-            # 2. Average similarity of users who rated it (0-0.3)
+            # Average similarity of users who rated it
             avg_similarity = total_similarity / users_who_rated if users_who_rated > 0 else 0
-            sim_confidence = min(avg_similarity, 0.3)
+            sim_confidence = min(avg_similarity * 2, 0.3)
             confidence_factors.append(sim_confidence)
             
-            # 3. How many ratings the current user has (0-0.3)
-            user_experience = min(len(self.user_ratings) / 20.0, 0.3)
+            # User experience (how many ratings they have)
+            user_experience = min(len(self.user_ratings) / 15.0, 0.3)
             confidence_factors.append(user_experience)
             
             return sum(confidence_factors)
             
         except Exception:
-            return 0.2  # Low default confidence
+            return 0.2
     
     def _predict_content_based_rating(self, movie: pd.Series) -> float:
         """
@@ -637,7 +885,7 @@ class CollaborativeFilter:
             movie_genres = [g.strip() for g in movie_genres if g.strip()]
             
             if not movie_genres or not genre_avg_ratings:
-                # No genre overlap, use movie's inherent quality adjusted to user's preference
+                # No genre overlap, use movie's quality adjusted to user's preference
                 movie_rating = float(movie.get('vote_average', 5.0))
                 return user_avg_rating * 0.4 + movie_rating * 0.6
             
@@ -652,26 +900,22 @@ class CollaborativeFilter:
             
             if matched_genres > 0:
                 genre_prediction /= matched_genres
-                # Combine with movie's inherent quality - balanced approach
+                # Combine with movie's inherent quality
                 movie_quality = float(movie.get('vote_average', 5.0))
-                predicted_rating = genre_prediction * 0.7 + movie_quality * 0.3  # More weight to user preference
+                predicted_rating = genre_prediction * 0.6 + movie_quality * 0.4
                 
-                # Remove overly conservative penalty
                 return max(1.0, min(10.0, predicted_rating))
             else:
-                # No genre match, still give reasonable prediction
+                # No genre match
                 movie_rating = float(movie.get('vote_average', 5.0))
-                conservative_pred = user_avg_rating * 0.4 + movie_rating * 0.6
-                
-                # Remove harsh penalty for no genre match
-                return max(1.0, min(10.0, conservative_pred))
+                return user_avg_rating * 0.3 + movie_rating * 0.7
             
         except Exception:
             return 5.0
 
     def get_user_stats(self) -> Dict[str, any]:
         """
-        Get statistics about user's rating patterns.
+        Get comprehensive statistics about user's rating patterns.
         """
         rated_movies = [movie_id for movie_id, rating in self.user_ratings.items() if rating > 0]
         
@@ -680,59 +924,115 @@ class CollaborativeFilter:
                 'total_rated': 0,
                 'avg_rating': 0.0,
                 'favorite_genres': [],
-                'total_watch_time': 0
+                'rating_distribution': {},
+                'diversity_score': 0.0
             }
         
         ratings = [self.user_ratings[movie_id] for movie_id in rated_movies]
         avg_rating = np.mean(ratings)
         
-        # Get favorite genres
+        # Get favorite genres with weights
         genre_counts = {}
+        genre_ratings = {}
+        languages = set()
+        
         for movie_id in rated_movies:
             movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
             if not movie_row.empty:
-                genres = str(movie_row.iloc[0]['genre']).split(',')
+                movie = movie_row.iloc[0]
+                
+                # Process genres
+                genres = str(movie['genre']).split(',')
                 for genre in genres:
                     genre = genre.strip()
                     if genre:
                         genre_counts[genre] = genre_counts.get(genre, 0) + 1
+                        if genre not in genre_ratings:
+                            genre_ratings[genre] = []
+                        genre_ratings[genre].append(self.user_ratings[movie_id])
+                
+                # Process languages for diversity
+                lang = str(movie.get('original_language', ''))
+                if lang:
+                    languages.add(lang)
         
-        favorite_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        favorite_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        # Rating distribution
+        rating_distribution = {}
+        for rating in ratings:
+            rating_distribution[rating] = rating_distribution.get(rating, 0) + 1
+        
+        # Calculate diversity score
+        diversity_score = len(languages) / max(len(rated_movies), 1) + len(genre_counts) / max(len(rated_movies), 1)
+        diversity_score = min(diversity_score, 1.0)
         
         return {
             'total_rated': len(rated_movies),
             'avg_rating': round(avg_rating, 1),
             'favorite_genres': [genre for genre, count in favorite_genres],
-            'genre_distribution': dict(favorite_genres)
+            'genre_ratings': {genre: round(np.mean(ratings), 1) for genre, ratings in genre_ratings.items()},
+            'rating_distribution': rating_distribution,
+            'diversity_score': round(diversity_score, 2),
+            'languages_explored': len(languages)
         }
 
 
 def create_recommender(df: pd.DataFrame) -> CollaborativeFilter:
-    """
-    Factory function to create a collaborative filter instance.
-    
-    Args:
-        df: Movie dataframe
-        
-    Returns:
-        CollaborativeFilter instance
-    """
+    """Factory function to create a collaborative filter instance."""
     return CollaborativeFilter(df)
 
 
-def get_recommendations(df: pd.DataFrame, user_ratings: Dict[str, int], 
-                       n_recommendations: int = 5) -> pd.DataFrame:
-    """
-    Convenience function to get movie recommendations.
-    
-    Args:
-        df: Movie dataframe
-        user_ratings: Dictionary of user ratings {movie_id: rating}
-        n_recommendations: Number of recommendations to return
+def load_users_data(users_file_path: str = None) -> Dict[str, Dict[str, int]]:
+    """Load user rating data from users_data.json file."""
+    try:
+        if users_file_path is None:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            users_file_path = os.path.join(os.path.dirname(current_dir), 'users_data.json')
         
-    Returns:
-        DataFrame containing recommended movies
-    """
+        if not os.path.exists(users_file_path):
+            logging.warning(f"Users data file not found at {users_file_path}")
+            return {}
+        
+        with open(users_file_path, 'r', encoding='utf-8') as f:
+            users_data = json.load(f)
+        
+        # Extract ratings data from JSON structure
+        real_users_data = {}
+        
+        if 'users' in users_data:
+            for user_id, user_info in users_data['users'].items():
+                if 'ratings' in user_info and user_info['ratings']:
+                    # Convert all keys to strings and ensure ratings are integers
+                    user_ratings = {}
+                    for movie_id, rating in user_info['ratings'].items():
+                        user_ratings[str(movie_id)] = int(rating)
+                    
+                    # Only include users with at least one rating
+                    if user_ratings:
+                        real_users_data[str(user_id)] = user_ratings
+        
+        logging.info(f"Loaded ratings data for {len(real_users_data)} users from users_data.json")
+        return real_users_data
+        
+    except Exception as e:
+        logging.error(f"Error loading users ratings data: {e}")
+        return {}
+
+
+def get_recommendations(df: pd.DataFrame, user_ratings: Dict[str, int], 
+                       n_recommendations: int = 5, 
+                       all_users_data: Optional[Dict[str, Dict[str, int]]] = None) -> pd.DataFrame:
+    """Get movie recommendations using improved hybrid collaborative filtering."""
     recommender = create_recommender(df)
     recommender.update_user_ratings(user_ratings)
-    return recommender.get_recommendations(n_recommendations)
+    
+    # Automatically load user data if not provided
+    return recommender.get_recommendations(n_recommendations, all_users_data)
+
+
+def get_recommendations_with_users_data(df: pd.DataFrame, user_ratings: Dict[str, int], 
+                                      n_recommendations: int = 5) -> pd.DataFrame:
+    """Get recommendations explicitly using actual user data for collaborative filtering."""
+    users_data = load_users_data()
+    return get_recommendations(df, user_ratings, n_recommendations, users_data)
