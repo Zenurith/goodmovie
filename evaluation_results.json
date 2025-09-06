@@ -2,35 +2,35 @@
   "evaluation_summary": {
     "dataset_info": {
       "total_movies": 9985,
-      "total_users": 38,
-      "total_ratings": 277,
-      "sparsity": 99.92699575679308
+      "total_users": 47,
+      "total_ratings": 351,
+      "sparsity": 99.92520695937523
     },
     "rating_prediction": {
-      "mae": 1.4401810587043076,
-      "rmse": 2.0824362033059174,
-      "total_predictions": 63
+      "mae": 1.3648628168098438,
+      "rmse": 2.135245891483369,
+      "total_predictions": 80
     },
     "ranking_metrics": {
       "5": {
-        "precision": 0.15625,
-        "recall": 0.4125,
-        "f1": 0.2127232142857143,
-        "ndcg": 0.30256278026236344,
-        "num_users": 32
+        "precision": 0.17948717948717952,
+        "recall": 0.41623931623931626,
+        "f1": 0.23369963369963373,
+        "ndcg": 0.32882465156425206,
+        "num_users": 39
       },
       "10": {
-        "precision": 0.10312500000000001,
-        "recall": 0.48005952380952377,
-        "f1": 0.16018442341971753,
-        "ndcg": 0.33521928896565145,
-        "num_users": 32
+        "precision": 0.12564102564102564,
+        "recall": 0.5443223443223444,
+        "f1": 0.19342608120888663,
+        "ndcg": 0.38400356216197445,
+        "num_users": 39
       }
     },
     "coverage_diversity": {
-      "catalog_coverage": 0.013219829744616926,
-      "unique_movies_recommended": 132,
-      "avg_genre_diversity": 7.787878787878788
+      "catalog_coverage": 0.015022533800701052,
+      "unique_movies_recommended": 150,
+      "avg_genre_diversity": 7.575
     },
     "user_similarity": {
       "avg_similarity": NaN,

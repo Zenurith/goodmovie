@@ -10,18 +10,28 @@ from datetime import datetime
 
 
 class UserManager:
-    """Simple user management system with file-based storage"""
+    """Simple user management system with file-based storage and in-memory caching"""
     
     def __init__(self, users_file: str = "users_data.json"):
         self.users_file = users_file
         self.users_data = self._load_users_data()
+        self._last_modified = 0
+        self._cache_valid = True
     
     def _load_users_data(self) -> Dict:
-        """Load users data from JSON file"""
+        """Load users data from JSON file with caching"""
         if os.path.exists(self.users_file):
             try:
+                # Check if file was modified since last load
+                current_modified = os.path.getmtime(self.users_file)
+                if hasattr(self, '_last_modified') and current_modified <= self._last_modified and self._cache_valid:
+                    return self.users_data
+                
                 with open(self.users_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    self._last_modified = current_modified
+                    self._cache_valid = True
+                    return data
             except (json.JSONDecodeError, FileNotFoundError):
                 pass
         
@@ -35,10 +45,11 @@ class UserManager:
         }
     
     def _save_users_data(self) -> bool:
-        """Save users data to JSON file"""
+        """Save users data to JSON file and invalidate cache"""
         try:
             with open(self.users_file, 'w', encoding='utf-8') as f:
                 json.dump(self.users_data, f, indent=2, ensure_ascii=False)
+            self._cache_valid = False  # Invalidate cache after write
             return True
         except Exception as e:
             print(f"Error saving users data: {e}")

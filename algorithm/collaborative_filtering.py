@@ -19,12 +19,26 @@ class CollaborativeFilter:
         self.svd_model = None
         self._users_data_cache = None
         self._similarity_cache = {}
+        self._matrix_cache = {}
+        self._profile_cache = {}
+        self._last_cache_clear = 0
         
     def update_user_ratings(self, user_ratings: Dict[str, int]) -> None:
         """Update the user ratings dictionary."""
         self.user_ratings = user_ratings.copy()
         # Clear caches when user ratings change
         self._similarity_cache.clear()
+        self._profile_cache.clear()
+        
+    def _clear_old_caches(self):
+        """Periodically clear caches to prevent memory buildup"""
+        import time
+        current_time = time.time()
+        if current_time - self._last_cache_clear > 1800:  # Clear every 30 minutes
+            self._similarity_cache.clear()
+            self._matrix_cache.clear()
+            self._profile_cache.clear()
+            self._last_cache_clear = current_time
     
     def _load_users_data(self, users_file_path: str = None) -> Dict[str, Dict[str, int]]:
         """Load user rating data from users_data.json file with caching."""
@@ -111,7 +125,12 @@ class CollaborativeFilter:
         return clean_data
     
     def _build_user_item_matrix(self, all_users_data: Dict[str, Dict[str, int]]) -> pd.DataFrame:
-        """Build user-item rating matrix with performance optimizations."""
+        """Build user-item rating matrix with performance optimizations and caching."""
+        # Check cache first
+        data_hash = hash(str(sorted(all_users_data.items())))
+        if data_hash in self._matrix_cache:
+            return self._matrix_cache[data_hash]
+        
         # Clean and extract ratings data, handling nested structure
         clean_users_data = self._extract_ratings_from_users_data(all_users_data)
         
@@ -133,22 +152,28 @@ class CollaborativeFilter:
         if not all_movie_ids:
             return pd.DataFrame()
         
-        # Build matrix more efficiently
-        matrix_data = []
+        # Build matrix more efficiently using numpy
+        num_users = len(clean_users_data)
+        num_movies = len(all_movie_ids)
+        matrix_data = np.zeros((num_users, num_movies))
         user_ids = []
         
-        for user_id, ratings in clean_users_data.items():
-            if isinstance(ratings, dict) and ratings:  # Only include users with ratings
-                user_row = []
-                for movie_id in all_movie_ids:
-                    user_row.append(ratings.get(movie_id, 0))  # 0 for unrated movies
-                matrix_data.append(user_row)
+        for i, (user_id, ratings) in enumerate(clean_users_data.items()):
+            if isinstance(ratings, dict) and ratings:
                 user_ids.append(user_id)
+                for j, movie_id in enumerate(all_movie_ids):
+                    matrix_data[i, j] = ratings.get(movie_id, 0)
         
-        if not matrix_data:
+        if not user_ids:
             return pd.DataFrame()
             
-        return pd.DataFrame(matrix_data, index=user_ids, columns=all_movie_ids)
+        result = pd.DataFrame(matrix_data, index=user_ids, columns=all_movie_ids)
+        
+        # Cache the result (limit cache size)
+        if len(self._matrix_cache) < 10:
+            self._matrix_cache[data_hash] = result
+        
+        return result
     
     @lru_cache(maxsize=128)
     def _calculate_user_similarity(self, user_item_matrix_hash: int, target_user: str) -> pd.Series:
@@ -256,14 +281,23 @@ class CollaborativeFilter:
     def get_recommendations(self, n_recommendations: int = 5, 
                           all_users_data: Optional[Dict[str, Dict[str, int]]] = None) -> pd.DataFrame:
         """
-        Generate movie recommendations using optimized collaborative filtering.
+        Generate movie recommendations using optimized collaborative filtering with caching.
         """
         try:
+            self._clear_old_caches()  # Periodic cache cleanup
+            
+            # Create cache key
+            cache_key = f"{hash(str(self.user_ratings))}_{n_recommendations}"
+            if cache_key in self._profile_cache:
+                return self._profile_cache[cache_key]
+            
             # Validate input
             valid_ratings = {k: v for k, v in self.user_ratings.items() if v > 0 and v <= 10}
             
             if not valid_ratings or len(valid_ratings) < 1:
-                return self._get_fallback_recommendations(n_recommendations)
+                result = self._get_fallback_recommendations(n_recommendations)
+                self._profile_cache[cache_key] = result
+                return result
             
             # Load user data if not provided
             if not all_users_data:
@@ -271,10 +305,16 @@ class CollaborativeFilter:
             
             # If we have multiple users' data, use collaborative filtering
             if all_users_data and len(all_users_data) > 3:  # Need at least 4 users for good CF
-                return self._get_fast_collaborative_recommendations(n_recommendations, all_users_data)
+                result = self._get_fast_collaborative_recommendations(n_recommendations, all_users_data)
             else:
                 # Fall back to content-based recommendations for speed
-                return self._get_content_based_recommendations(n_recommendations)
+                result = self._get_content_based_recommendations(n_recommendations)
+            
+            # Cache result (limit cache size)
+            if len(self._profile_cache) < 50:
+                self._profile_cache[cache_key] = result
+                
+            return result
             
         except Exception as e:
             logging.error(f"Error in get_recommendations: {e}")
@@ -536,7 +576,15 @@ class CollaborativeFilter:
             genre_scores = {}
             
             for movie_id, rating in high_rated_movies.items():
-                movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
+                # Handle both string and numeric IDs
+                try:
+                    movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
+                    if movie_row.empty:
+                        # Try numeric comparison if string comparison failed
+                        movie_row = self.df[self.df['id'] == int(movie_id)]
+                except (ValueError, TypeError):
+                    movie_row = pd.DataFrame()
+                    
                 if not movie_row.empty:
                     genres = str(movie_row.iloc[0]['genre']).split(',')
                     for genre in genres:
@@ -577,7 +625,15 @@ class CollaborativeFilter:
             # Sort by score and return top N
             recommendations.sort(key=lambda x: x['content_score'], reverse=True)
             
-            return pd.DataFrame(recommendations[:n_recommendations])
+            if recommendations:
+                return pd.DataFrame(recommendations[:n_recommendations])
+            else:
+                # If no genre matches found, return best unrated movies
+                if not quality_movies.empty:
+                    best_unrated = quality_movies.nlargest(n_recommendations, 'vote_average')
+                    return best_unrated
+                else:
+                    return self._get_fallback_recommendations(n_recommendations)
             
         except Exception as e:
             logging.error(f"Error in content-based recommendations: {e}")
@@ -694,10 +750,27 @@ class CollaborativeFilter:
     def _get_fallback_recommendations(self, n_recommendations: int) -> pd.DataFrame:
         """Get high-quality popular movies as fallback."""
         try:
-            return self.df[
+            # Try high-quality movies first
+            high_quality = self.df[
                 (self.df['vote_average'] >= 7.5) & 
                 (self.df['vote_count'] >= 1000)
-            ].nlargest(n_recommendations, ['vote_average', 'popularity'])
+            ]
+            
+            if not high_quality.empty:
+                return high_quality.nlargest(n_recommendations, ['vote_average', 'popularity'])
+            
+            # Fall back to good movies
+            good_quality = self.df[
+                (self.df['vote_average'] >= 6.0) & 
+                (self.df['vote_count'] >= 100)
+            ]
+            
+            if not good_quality.empty:
+                return good_quality.nlargest(n_recommendations, ['vote_average', 'popularity'])
+            
+            # Final fallback - just return top rated movies
+            return self.df.nlargest(n_recommendations, 'vote_average')
+            
         except Exception:
             return self.df.head(n_recommendations)
     

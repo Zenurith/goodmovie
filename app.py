@@ -262,30 +262,65 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data
+@st.cache_data(ttl=7200)  # Cache for 2 hours
 def load_movie_data():
     try:
         df = pd.read_csv('dataset/movies.csv')
+        # Optimize data types for better performance
+        if 'id' in df.columns:
+            df['id'] = pd.to_numeric(df['id'], errors='coerce')
+        if 'vote_average' in df.columns:
+            df['vote_average'] = pd.to_numeric(df['vote_average'], errors='coerce')
+        if 'vote_count' in df.columns:
+            df['vote_count'] = pd.to_numeric(df['vote_count'], errors='coerce')
+        if 'popularity' in df.columns:
+            df['popularity'] = pd.to_numeric(df['popularity'], errors='coerce')
         return df
     except FileNotFoundError:
         st.error("Movies dataset not found. Please make sure 'dataset/movies.csv' exists.")
         return pd.DataFrame()
 
-@st.cache_data
+@st.cache_data(ttl=3600)
+def get_filtered_movies(df, genre_filter=None, min_rating=0.0, min_year=None):
+    """Pre-filter movies for better performance"""
+    filtered_df = df.copy()
+    
+    if genre_filter and genre_filter != "All":
+        filtered_df = filtered_df[filtered_df['genre'].str.contains(genre_filter, na=False)]
+    
+    if min_rating > 0:
+        filtered_df = filtered_df[filtered_df['vote_average'] >= min_rating]
+    
+    if min_year:
+        filtered_df['year'] = pd.to_datetime(filtered_df['release_date'], errors='coerce').dt.year
+        filtered_df = filtered_df[filtered_df['year'] >= min_year]
+    
+    return filtered_df
+
+@st.cache_data(ttl=3600, max_entries=500)  # Cache for 1 hour, limit cache size
 def fetch_poster(movie_id):
     try:
         url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key=d33748abb9bc67b4691fcc92d60d189c&language=en-US"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=2)  # Further reduced timeout for better UX
+        response.raise_for_status()  # Raise exception for bad status codes
         data = response.json()
         
         if 'poster_path' in data and data['poster_path']:
             poster_path = data['poster_path']
-            full_path = f"https://image.tmdb.org/t/p/w500{poster_path}"
+            full_path = f"https://image.tmdb.org/t/p/w400{poster_path}"  # Reduced image size for faster loading
             return full_path
         else:
-            return "https://via.placeholder.com/500x750/333333/ffffff?text=No+Poster"
+            return "https://via.placeholder.com/400x600/333333/ffffff?text=No+Poster"
     except Exception as e:
-        return "https://via.placeholder.com/500x750/333333/ffffff?text=No+Poster"
+        return "https://via.placeholder.com/400x600/333333/ffffff?text=No+Poster"
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def fetch_multiple_posters(movie_ids):
+    """Batch fetch posters for multiple movies"""
+    posters = {}
+    for movie_id in movie_ids:
+        posters[movie_id] = fetch_poster(movie_id)
+    return posters
 
 def load_user_ratings():
     """Load ratings for the current logged-in user"""
@@ -311,15 +346,17 @@ def save_user_rating(movie_id, rating):
     user_manager = get_user_manager()
     return user_manager.save_user_rating(st.session_state.current_user, movie_id, rating)
 
+@st.cache_data(ttl=1800)  # Cache search results for 30 minutes
 def search_movies(df, search_term):
     if not search_term:
         return df
     
-    search_term = search_term.lower()
+    search_term = search_term.lower().strip()
+    # Optimize search using vectorized operations
     mask = (
-        df['title'].str.lower().str.contains(search_term, na=False) |
-        df['genre'].str.lower().str.contains(search_term, na=False) |
-        df['overview'].str.lower().str.contains(search_term, na=False)
+        df['title'].str.lower().str.contains(search_term, na=False, regex=False) |
+        df['genre'].str.lower().str.contains(search_term, na=False, regex=False) |
+        df['overview'].str.lower().str.contains(search_term, na=False, regex=False)
     )
     return df[mask]
 
@@ -349,13 +386,29 @@ def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
     Returns:
         DataFrame with recommended movies from both algorithms
     """
+    # Use session state caching for recommendations with TTL
+    cache_key = f"recommendations_{hash(str(user_ratings))}_{n_recommendations}"
+    cache_timestamp_key = f"{cache_key}_timestamp"
+    
+    # Check if cache is still valid (30 minutes TTL)
+    import time
+    current_time = time.time()
+    if (cache_key in st.session_state and 
+        cache_timestamp_key in st.session_state and
+        current_time - st.session_state[cache_timestamp_key] < 1800):  # 30 minutes
+        return st.session_state[cache_key]
+    
     if not user_ratings or len(user_ratings) == 0:
         # For completely new users, use content-based with default profile
         try:
-            return get_content_based_recommendations(df, {}, n_recommendations)
+            result = get_content_based_recommendations(df, {}, n_recommendations)
+            st.session_state[cache_key] = result
+            return result
         except Exception as e:
             st.error(f"Error getting content-based recommendations: {e}")
-            return df.nlargest(n_recommendations, 'vote_average')
+            result = df.nlargest(n_recommendations, 'vote_average')
+            st.session_state[cache_key] = result
+            return result
     
     # Determine the split based on number of ratings
     num_ratings = len([r for r in user_ratings.values() if r > 0])
@@ -430,10 +483,16 @@ def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
                 seen_movies.add(movie_id)
     
     if recommendations:
-        return pd.DataFrame(recommendations[:n_recommendations])
+        result = pd.DataFrame(recommendations[:n_recommendations])
+        st.session_state[cache_key] = result
+        st.session_state[cache_timestamp_key] = current_time
+        return result
     else:
         # Fallback to top-rated movies
-        return df.nlargest(n_recommendations, 'vote_average')
+        result = df.nlargest(n_recommendations, 'vote_average')
+        st.session_state[cache_key] = result
+        st.session_state[cache_timestamp_key] = current_time
+        return result
 
 def display_pagination_controls(total_items, current_page, items_per_page):
     """Display pagination controls with Previous/Next buttons"""
@@ -535,10 +594,14 @@ def show_login_page():
 def display_movie_card(movie, clickable=True, context=""):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
     
-    # Get poster URL if movie has an ID
+    # Get poster URL if movie has an ID (with lazy loading)
     poster_url = None
     if 'id' in movie and pd.notna(movie['id']):
-        poster_url = fetch_poster(int(movie['id']))
+        # Use session state to cache poster URLs
+        poster_cache_key = f"poster_{int(movie['id'])}"
+        if poster_cache_key not in st.session_state:
+            st.session_state[poster_cache_key] = fetch_poster(int(movie['id']))
+        poster_url = st.session_state[poster_cache_key]
     
     # Load user ratings
     user_ratings = load_user_ratings()
@@ -613,10 +676,14 @@ def display_movie_card(movie, clickable=True, context=""):
 def display_movie_modal(movie, df):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
     
-    # Get poster URL
+    # Get poster URL (with lazy loading)
     poster_url = None
     if 'id' in movie and pd.notna(movie['id']):
-        poster_url = fetch_poster(int(movie['id']))
+        # Use session state to cache poster URLs
+        poster_cache_key = f"poster_{int(movie['id'])}"
+        if poster_cache_key not in st.session_state:
+            st.session_state[poster_cache_key] = fetch_poster(int(movie['id']))
+        poster_url = st.session_state[poster_cache_key]
     
     # Load current rating
     user_ratings = load_user_ratings()
@@ -700,10 +767,40 @@ def display_movie_modal(movie, df):
         stars_display = '⭐' * current_rating + '☆' * (10 - current_rating)
         st.markdown(f"<div style='text-align: center; font-size: 1.5rem; color: #ffd700; margin: 1rem 0;'>{stars_display} ({current_rating}/10)</div>", unsafe_allow_html=True)
     
-    # Show recommendations based on this rating
-    if current_rating > 0:
-        st.markdown('<div class="recommendations-section">', unsafe_allow_html=True)
-        st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 Recommended for You</h3>", unsafe_allow_html=True)
+    # Show content-based "You may also like" recommendations
+    st.markdown('<div class="recommendations-section">', unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎬 You May Also Like</h3>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color: #cccccc; margin-bottom: 1rem; font-style: italic;'>Movies similar to <strong>{movie['title']}</strong> based on genres, ratings, and content features</p>", unsafe_allow_html=True)
+    
+    # Get similar movies using content-based algorithm
+    from algorithm.content_based import create_content_based_recommender
+    content_recommender = create_content_based_recommender(df)
+    similar_movies = content_recommender.get_similar_movies(movie_id, 4)
+    
+    if not similar_movies.empty:
+        # Display 4 similar movies in a single row
+        rec_cols = st.columns(4)
+        for idx, (_, rec_movie) in enumerate(similar_movies.iterrows()):
+            with rec_cols[idx]:
+                # Add similarity score if available
+                similarity_score = rec_movie.get('similarity_score', 0)
+                if similarity_score > 0:
+                    st.markdown(f"<div style='text-align: center; color: #ff4444; font-size: 0.8rem; margin-bottom: 0.5rem;'>Match: {similarity_score:.2f}</div>", unsafe_allow_html=True)
+                display_movie_card(rec_movie, clickable=True, context=f"similar_{idx}")
+    else:
+        st.markdown("<p style='color: #999; text-align: center; padding: 2rem;'>No similar movies found. Try rating this movie to get personalized recommendations!</p>", unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Show personalized recommendations if user has rated 3+ movies
+    num_ratings = len([rating for rating in user_ratings.values() if rating > 0])
+    
+    # Debug info (you can remove this later)
+    st.markdown(f"<p style='color: #666; font-size: 0.8rem; text-align: center; margin: 1rem 0;'>Debug: You have rated {num_ratings} movies. Collaborative filtering {'ACTIVE' if num_ratings >= 3 else 'needs ' + str(3 - num_ratings) + ' more ratings'}</p>", unsafe_allow_html=True)
+    
+    if num_ratings >= 3:
+        st.markdown('<div class="recommendations-section" style="margin-top: 1rem;">', unsafe_allow_html=True)
+        st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 More Recommendations for You</h3>", unsafe_allow_html=True)
         
         recommendations = get_hybrid_recommendations(df, user_ratings, 4)
         
@@ -716,12 +813,16 @@ def display_movie_modal(movie, df):
             st.write("Rate more movies to get better recommendations!")
         
         st.markdown('</div>', unsafe_allow_html=True)
+    elif num_ratings > 0:
+        st.markdown('<div class="recommendations-section" style="margin-top: 1rem; text-align: center; padding: 1rem;">', unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #ff4444; font-style: italic;'>Rate {3 - num_ratings} more movies to unlock personalized collaborative filtering recommendations!</p>", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # Simple spacing at the bottom
     st.markdown("<br><br>", unsafe_allow_html=True)
 
 def main():
-    # Initialize session state
+    # Initialize session state with performance optimizations
     if 'show_modal' not in st.session_state:
         st.session_state.show_modal = False
     if 'current_user' not in st.session_state:
@@ -730,14 +831,22 @@ def main():
         st.session_state.current_page = 1
     if 'movies_per_page' not in st.session_state:
         st.session_state.movies_per_page = 12
+    if 'movie_df_cache' not in st.session_state:
+        st.session_state.movie_df_cache = None
+    if 'poster_cache' not in st.session_state:
+        st.session_state.poster_cache = {}
     
     # Check if user is logged in
     if not st.session_state.current_user:
         show_login_page()
         return
     
-    # Load data
-    df = load_movie_data()
+    # Load data with caching
+    if st.session_state.movie_df_cache is None:
+        df = load_movie_data()
+        st.session_state.movie_df_cache = df
+    else:
+        df = st.session_state.movie_df_cache
     
     if df.empty:
         st.error("No movie data available")

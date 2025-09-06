@@ -33,7 +33,19 @@ class ContentBasedRecommender:
                 - original_language: language code
                 - overview: movie description
         """
-        self.df = df.copy()
+        # Optimize dataframe for better performance
+        self.df = df.copy().reset_index(drop=True)
+        
+        # Pre-optimize data types
+        if 'id' in self.df.columns:
+            self.df['id'] = pd.to_numeric(self.df['id'], errors='coerce')
+        if 'vote_average' in self.df.columns:
+            self.df['vote_average'] = pd.to_numeric(self.df['vote_average'], errors='coerce')
+        if 'vote_count' in self.df.columns:
+            self.df['vote_count'] = pd.to_numeric(self.df['vote_count'], errors='coerce')
+        if 'popularity' in self.df.columns:
+            self.df['popularity'] = pd.to_numeric(self.df['popularity'], errors='coerce')
+            
         self.user_ratings = {}
         self.movie_features = None
         self.tfidf_matrix = None
@@ -41,6 +53,7 @@ class ContentBasedRecommender:
         self.scaler = StandardScaler()
         self.genre_list = self._extract_all_genres()
         self.user_profile = None
+        self._feature_cache = {}  # Cache for feature extraction
         
         # Precompute movie features for better performance
         self._build_movie_features()
@@ -85,6 +98,11 @@ class ContentBasedRecommender:
         Returns:
             Dictionary of feature_name -> feature_value
         """
+        # Check cache first for performance
+        movie_id = str(movie.get('id', movie.get('title', '')))
+        if movie_id in self._feature_cache:
+            return self._feature_cache[movie_id]
+            
         features = {}
         
         # 1. Genre features (binary encoding)
@@ -128,6 +146,8 @@ class ContentBasedRecommender:
         quality_score = (vote_avg / 10.0) * 0.6 + min(popularity / 50.0, 1.0) * 0.3 + min(vote_count / 2000.0, 1.0) * 0.1
         features['quality_score'] = quality_score
         
+        # Cache the result for future use
+        self._feature_cache[movie_id] = features
         return features
         
     def _parse_genres(self, genre_str: str) -> Set[str]:
@@ -140,28 +160,27 @@ class ContentBasedRecommender:
         """Build TF-IDF matrix from movie text features (genres + overview)."""
         text_features = []
         
-        for _, movie in self.df.iterrows():
-            # Combine genre and overview for text analysis
-            genres = str(movie.get('genre', '')).replace(',', ' ')
-            overview = str(movie.get('overview', ''))
-            
-            # Clean and combine text
-            text_content = f"{genres} {overview}"
-            text_content = re.sub(r'[^a-zA-Z\s]', ' ', text_content)
-            text_content = ' '.join(text_content.split())  # Normalize whitespace
-            
-            text_features.append(text_content)
-            
-        # Create TF-IDF vectors
-        vectorizer = TfidfVectorizer(
-            max_features=1000,
-            stop_words='english',
-            ngram_range=(1, 2),
-            min_df=2,
-            max_df=0.8
+        # Vectorized text processing for better performance
+        genres_clean = self.df['genre'].fillna('').str.replace(',', ' ')
+        overview_clean = self.df['overview'].fillna('')
+        
+        # Combine and clean text efficiently
+        combined_text = (genres_clean + ' ' + overview_clean).apply(
+            lambda x: ' '.join(re.sub(r'[^a-zA-Z\s]', ' ', str(x)).split())
         )
         
-        self.tfidf_matrix = vectorizer.fit_transform(text_features)
+        # Create TF-IDF vectors with optimized parameters for movie data
+        vectorizer = TfidfVectorizer(
+            max_features=800,  # Reduced for better performance
+            stop_words='english',
+            ngram_range=(1, 2),
+            min_df=3,  # Slightly higher to reduce noise
+            max_df=0.7,  # More restrictive to focus on distinctive terms
+            lowercase=True,
+            strip_accents='ascii'
+        )
+        
+        self.tfidf_matrix = vectorizer.fit_transform(combined_text)
         
     def _build_content_similarity_matrix(self) -> None:
         """Build similarity matrix combining numerical and text features."""
