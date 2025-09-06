@@ -532,6 +532,7 @@ def show_login_page():
     with col3:
         st.metric("Avg Ratings/User", stats["average_ratings_per_user"])
 
+
 def display_movie_card(movie, clickable=True, context=""):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
     
@@ -610,6 +611,7 @@ def display_movie_card(movie, clickable=True, context=""):
             st.session_state.show_modal = True
             st.rerun()
 
+
 def display_movie_modal(movie, df):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
     
@@ -622,57 +624,72 @@ def display_movie_modal(movie, df):
     user_ratings = load_user_ratings()
     current_rating = user_ratings.get(movie_id, 0)
     
-    # Modal content with back button
+    # Back to main page button
+    if st.button("🏠 Back to Main", key="back_to_main", type="secondary"):
+        if 'show_modal' in st.session_state:
+            del st.session_state.show_modal
+        if 'selected_movie' in st.session_state:
+            del st.session_state.selected_movie
+        st.rerun()
+    
+    # Movie title header
     st.markdown(f"""
-    <div class="modal-content">
-        <div class="modal-header">
-            <h1 style="color: #ff4444; margin: 0;">{movie['title']}</h1>
-        </div>
+    <div style="text-align: center; margin: 2rem 0;">
+        <h1 style="color: #ff4444; margin: 0; font-size: 2.5rem;">{movie['title']}</h1>
     </div>
     """, unsafe_allow_html=True)
     
-    # Back to main page button (top-left corner)
-    col_back, col_spacer = st.columns([1, 5])
-    with col_back:
-        if st.button("🏠 Back to Main", key="back_to_main", type="secondary"):
-            if 'show_modal' in st.session_state:
-                del st.session_state.show_modal
-            if 'selected_movie' in st.session_state:
-                del st.session_state.selected_movie
-            st.rerun()
-    
-    # Two columns layout
+    # Two columns layout for poster and details
     col1, col2 = st.columns([1, 2])
     
     with col1:
         # Display poster
         if poster_url and not poster_url.endswith('No+Poster'):
-            st.image(poster_url, use_container_width=True)
+            st.image(poster_url, width=400)
         else:
-            st.markdown('<div class="poster-placeholder">No Poster Available</div>', unsafe_allow_html=True)
+            st.markdown("""
+            <div style="width: 400px; height: 600px; background: linear-gradient(135deg, #333, #222); 
+                        display: flex; align-items: center; justify-content: center; 
+                        color: #999; border-radius: 15px; border: 2px dashed #555;
+                        flex-direction: column; text-align: center;">
+                <div style="font-size: 3rem; margin-bottom: 1rem;">🎬</div>
+                <div style="font-size: 1.2rem; font-weight: bold;">No Poster Available</div>
+                <div style="font-size: 0.9rem; margin-top: 0.5rem; color: #777;">Movie poster not found</div>
+            </div>
+            """, unsafe_allow_html=True)
     
     with col2:
-        # Movie details
+        # Movie details with improved readability
         st.markdown(f"""
-        <div style="padding: 1rem;">
-            <div style="font-size: 1.2rem; margin-bottom: 1rem;">
-                <span style="color: #ffd700;">⭐ {movie['vote_average']}</span> ({movie['vote_count']} votes)
+        <div style="padding: 2rem; background-color: #1a1a1a; border-radius: 15px; margin-left: 1rem;">
+            <div style="font-size: 1.5rem; margin-bottom: 2rem; text-align: center;">
+                <span style="color: #ffd700; font-weight: bold;">⭐ {movie['vote_average']}/10</span> 
+                <span style="color: #ffffff;">({movie['vote_count']} votes)</span>
             </div>
-            <div style="margin-bottom: 0.5rem;"><strong>Release Date:</strong> {movie['release_date']}</div>
-            <div style="margin-bottom: 0.5rem;"><strong>Popularity:</strong> {movie['popularity']:.1f}</div>
-            <div style="margin-bottom: 1rem;">
-                <strong>Genres:</strong><br>
-                {' '.join([f'<span class="genre">{genre.strip()}</span>' for genre in str(movie['genre']).split(',')])}
+            <div style="margin-bottom: 1.5rem; color: #ffffff; font-size: 1.1rem;">
+                <strong style="color: #ff4444;">Release Date:</strong> 
+                <span style="color: #cccccc; margin-left: 0.5rem;">{movie['release_date']}</span>
+            </div>
+            <div style="margin-bottom: 1.5rem; color: #ffffff; font-size: 1.1rem;">
+                <strong style="color: #ff4444;">Popularity:</strong> 
+                <span style="color: #cccccc; margin-left: 0.5rem;">{movie['popularity']:.1f}</span>
+            </div>
+            <div style="margin-bottom: 2rem;">
+                <strong style="color: #ff4444; font-size: 1.1rem;">Genres:</strong><br>
+                <div style="margin-top: 1rem;">
+                    {' '.join([f'<span style="background-color: #333; color: #ffffff; padding: 0.4rem 1rem; border-radius: 20px; font-size: 0.9rem; margin: 0.3rem; display: inline-block;">{genre.strip()}</span>' for genre in str(movie['genre']).split(',')])}
+                </div>
             </div>
             <div style="margin-bottom: 1rem;">
-                <strong>Overview:</strong><br>
-                <p style="text-align: justify; line-height: 1.5;">{movie['overview']}</p>
+                <strong style="color: #ff4444; font-size: 1.1rem;">Overview:</strong><br>
+                <p style="color: #cccccc; text-align: justify; line-height: 1.7; margin-top: 1rem; font-size: 1rem;">{movie['overview']}</p>
             </div>
         </div>
         """, unsafe_allow_html=True)
     
     # Star rating system
-    st.markdown("<h3 style='color: #ff4444; text-align: center; margin-top: 2rem;'>⭐ Rate this Movie (1-10 stars)</h3>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-top: 3rem;'></div>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #ff4444; text-align: center; margin: 2rem 0;'>⭐ Rate this Movie (1-10 stars)</h3>", unsafe_allow_html=True)
     
     # Create star rating interface
     rating_cols = st.columns(10)
@@ -698,12 +715,42 @@ def display_movie_modal(movie, df):
     # Display current rating
     if current_rating > 0:
         stars_display = '⭐' * current_rating + '☆' * (10 - current_rating)
-        st.markdown(f"<div style='text-align: center; font-size: 1.5rem; color: #ffd700; margin: 1rem 0;'>{stars_display} ({current_rating}/10)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align: center; font-size: 1.8rem; color: #ffd700; margin: 2rem 0; padding: 1rem; background-color: #1a1a1a; border-radius: 10px;'>{stars_display}<br><span style='font-size: 1.2rem; color: #ffffff;'>Your Rating: {current_rating}/10</span></div>", unsafe_allow_html=True)
     
-    # Show recommendations based on this rating
-    if current_rating > 0:
-        st.markdown('<div class="recommendations-section">', unsafe_allow_html=True)
-        st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 Recommended for You</h3>", unsafe_allow_html=True)
+    # Show content-based "You may also like" recommendations
+    st.markdown('<div class="recommendations-section">', unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎬 You May Also Like</h3>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color: #cccccc; margin-bottom: 1rem; font-style: italic;'>Movies similar to <strong>{movie['title']}</strong> based on genres, ratings, and content features</p>", unsafe_allow_html=True)
+    
+    # Get similar movies using content-based algorithm
+    from algorithm.content_based import create_content_based_recommender
+    content_recommender = create_content_based_recommender(df)
+    similar_movies = content_recommender.get_similar_movies(movie_id, 4)
+    
+    if not similar_movies.empty:
+        # Display 4 similar movies in a single row
+        rec_cols = st.columns(4)
+        for idx, (_, rec_movie) in enumerate(similar_movies.iterrows()):
+            with rec_cols[idx]:
+                # Add similarity score if available
+                similarity_score = rec_movie.get('similarity_score', 0)
+                if similarity_score > 0:
+                    st.markdown(f"<div style='text-align: center; color: #ff4444; font-size: 0.8rem; margin-bottom: 0.5rem;'>Match: {similarity_score:.2f}</div>", unsafe_allow_html=True)
+                display_movie_card(rec_movie, clickable=True, context=f"similar_{idx}")
+    else:
+        st.markdown("<p style='color: #999; text-align: center; padding: 2rem;'>No similar movies found. Try rating this movie to get personalized recommendations!</p>", unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Show personalized recommendations if user has rated 3+ movies
+    num_ratings = len([rating for rating in user_ratings.values() if rating > 0])
+    
+    # Debug info (you can remove this later)
+    st.markdown(f"<p style='color: #666; font-size: 0.8rem; text-align: center; margin: 1rem 0;'>Debug: You have rated {num_ratings} movies. Collaborative filtering {'ACTIVE' if num_ratings >= 3 else 'needs ' + str(3 - num_ratings) + ' more ratings'}</p>", unsafe_allow_html=True)
+    
+    if num_ratings >= 3:
+        st.markdown('<div class="recommendations-section" style="margin-top: 1rem;">', unsafe_allow_html=True)
+        st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 More Recommendations for You</h3>", unsafe_allow_html=True)
         
         recommendations = get_hybrid_recommendations(df, user_ratings, 4)
         
@@ -715,6 +762,10 @@ def display_movie_modal(movie, df):
         else:
             st.write("Rate more movies to get better recommendations!")
         
+        st.markdown('</div>', unsafe_allow_html=True)
+    elif num_ratings > 0:
+        st.markdown('<div class="recommendations-section" style="margin-top: 1rem; text-align: center; padding: 1rem;">', unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #ff4444; font-style: italic;'>Rate {3 - num_ratings} more movies to unlock personalized collaborative filtering recommendations!</p>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
     # Simple spacing at the bottom
