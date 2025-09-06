@@ -5,7 +5,10 @@ from PIL import Image
 import io
 import json
 import os
+import time
+from datetime import datetime
 from algorithm import get_recommendations, get_content_based_recommendations
+from algorithm.tfidf_content import search_movies_tfidf, create_tfidf_search_engine
 from user_manager import get_user_manager
 
 # Page configuration
@@ -330,6 +333,84 @@ def load_user_ratings():
     user_manager = get_user_manager()
     return user_manager.get_user_ratings(st.session_state.current_user)
 
+def track_session_interaction(interaction_type, movie_id=None, search_term=None, genre=None):
+    """Track user interactions for session-based recommendations"""
+    if 'current_user' not in st.session_state or not st.session_state.current_user:
+        return
+    
+    # Initialize session data if not exists
+    if 'session_data' not in st.session_state:
+        st.session_state.session_data = {
+            'movie_views': [],
+            'modal_opens': [],
+            'search_queries': [],
+            'genre_interests': {},
+            'session_start': time.time()
+        }
+    
+    current_time = time.time()
+    
+    if interaction_type == 'movie_view' and movie_id:
+        st.session_state.session_data['movie_views'].append({
+            'movie_id': movie_id,
+            'timestamp': current_time
+        })
+    elif interaction_type == 'modal_open' and movie_id:
+        st.session_state.session_data['modal_opens'].append({
+            'movie_id': movie_id,
+            'timestamp': current_time
+        })
+    elif interaction_type == 'search' and search_term:
+        st.session_state.session_data['search_queries'].append({
+            'query': search_term.lower().strip(),
+            'timestamp': current_time
+        })
+    elif interaction_type == 'genre_interest' and genre:
+        if genre not in st.session_state.session_data['genre_interests']:
+            st.session_state.session_data['genre_interests'][genre] = 0
+        st.session_state.session_data['genre_interests'][genre] += 1
+
+def calculate_implicit_signals():
+    """Calculate implicit feedback signals from session data"""
+    if 'session_data' not in st.session_state:
+        return {}
+    
+    session_data = st.session_state.session_data
+    implicit_signals = {}
+    
+    # Weight different interactions
+    for view in session_data.get('movie_views', []):
+        movie_id = str(view['movie_id'])
+        if movie_id not in implicit_signals:
+            implicit_signals[movie_id] = 0
+        implicit_signals[movie_id] += 0.2  # Light interest
+    
+    for modal in session_data.get('modal_opens', []):
+        movie_id = str(modal['movie_id'])
+        if movie_id not in implicit_signals:
+            implicit_signals[movie_id] = 0
+        implicit_signals[movie_id] += 0.5  # Moderate interest
+    
+    return implicit_signals
+
+def get_collaborative_confidence(num_ratings, implicit_signals=None):
+    """Calculate confidence score for collaborative filtering"""
+    if num_ratings == 0:
+        return 0.0
+    elif num_ratings == 1:
+        base_confidence = 0.2
+    elif num_ratings == 2:
+        base_confidence = 0.4
+    else:
+        base_confidence = min(0.8 + (num_ratings - 3) * 0.05, 1.0)
+    
+    # Boost confidence with implicit signals
+    if implicit_signals:
+        implicit_boost = min(len(implicit_signals) * 0.1, 0.3)
+        base_confidence = min(base_confidence + implicit_boost, 1.0)
+    
+    return base_confidence
+
 def save_user_ratings(ratings):
     """Save ratings for the current logged-in user"""
     if 'current_user' not in st.session_state or not st.session_state.current_user:
@@ -348,17 +429,68 @@ def save_user_rating(movie_id, rating):
 
 @st.cache_data(ttl=1800)  # Cache search results for 30 minutes
 def search_movies(df, search_term):
+    """Enhanced movie search using TF-IDF content-based search with fallback to basic search."""
     if not search_term:
         return df
     
     search_term = search_term.lower().strip()
-    # Optimize search using vectorized operations
+    # Track search interaction
+    track_session_interaction('search', search_term=search_term)
+    
+    try:
+        # Use TF-IDF search for intelligent content-based search
+        tfidf_results = search_movies_tfidf(df, search_term, max_results=100)
+        
+        if not tfidf_results.empty:
+            # Sort by final_score if available, otherwise by search_similarity
+            sort_column = 'final_score' if 'final_score' in tfidf_results.columns else 'search_similarity'
+            tfidf_results = tfidf_results.sort_values(sort_column, ascending=False)
+            
+            # Remove the extra scoring columns before returning (keep original df structure)
+            columns_to_keep = [col for col in df.columns if col in tfidf_results.columns]
+            result = tfidf_results[columns_to_keep]
+            
+            return result
+    
+    except Exception as e:
+        # Log the error but continue with fallback search
+        import logging
+        logging.warning(f"TF-IDF search failed, using fallback: {e}")
+    
+    # Fallback to basic search if TF-IDF fails
     mask = (
         df['title'].str.lower().str.contains(search_term, na=False, regex=False) |
         df['genre'].str.lower().str.contains(search_term, na=False, regex=False) |
         df['overview'].str.lower().str.contains(search_term, na=False, regex=False)
     )
     return df[mask]
+
+def get_search_suggestions(df, partial_query, max_suggestions=5):
+    """Get intelligent search suggestions using TF-IDF search engine."""
+    if not partial_query or len(partial_query.strip()) < 2:
+        return []
+    
+    try:
+        # Use the TF-IDF search engine to get suggestions
+        search_engine = create_tfidf_search_engine(df)
+        suggestions = search_engine.get_search_suggestions(partial_query, max_suggestions)
+        return suggestions
+    except Exception as e:
+        # Fallback to simple suggestions
+        import logging
+        logging.warning(f"TF-IDF suggestions failed, using fallback: {e}")
+        
+        # Simple fallback suggestions based on movie titles
+        suggestions = []
+        query_lower = partial_query.lower()
+        
+        for title in df['title'][:100]:  # Check first 100 movies for performance
+            if query_lower in title.lower():
+                suggestions.append(title)
+                if len(suggestions) >= max_suggestions:
+                    break
+        
+        return suggestions
 
 def collaborative_filtering_recommendations(df, user_ratings, n_recommendations=5):
     """
@@ -374,9 +506,36 @@ def collaborative_filtering_recommendations(df, user_ratings, n_recommendations=
     """
     return get_recommendations(df, user_ratings, n_recommendations)
 
+def get_content_based_recommendations_with_implicit(df, user_ratings, implicit_signals, n_recommendations=10):
+    """
+    Get content-based recommendations enhanced with implicit signals from session data.
+    
+    Args:
+        df: Movie dataframe  
+        user_ratings: Dictionary of explicit user ratings
+        implicit_signals: Dictionary of implicit signals from session
+        n_recommendations: Number of recommendations to return
+        
+    Returns:
+        DataFrame with recommended movies
+    """
+    # Combine explicit ratings with implicit signals
+    combined_ratings = user_ratings.copy()
+    
+    # Add implicit signals as pseudo-ratings (scaled to 1-10 range)
+    for movie_id, signal_strength in implicit_signals.items():
+        if movie_id not in combined_ratings:
+            # Convert signal strength to rating scale (signals are 0.2-0.5, convert to 5-7 rating)
+            pseudo_rating = min(10, max(5, int(signal_strength * 10) + 5))
+            combined_ratings[movie_id] = pseudo_rating
+    
+    # Use enhanced ratings for content-based recommendations
+    return get_content_based_recommendations(df, combined_ratings, n_recommendations)
+
 def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
     """
     Get hybrid recommendations combining collaborative filtering and content-based filtering.
+    Uses progressive confidence scoring instead of hard thresholds.
     
     Args:
         df: Movie dataframe
@@ -387,44 +546,59 @@ def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
         DataFrame with recommended movies from both algorithms
     """
     # Use session state caching for recommendations with TTL
-    cache_key = f"recommendations_{hash(str(user_ratings))}_{n_recommendations}"
+    implicit_signals = calculate_implicit_signals()
+    cache_key = f"recommendations_{hash(str(user_ratings))}_{hash(str(implicit_signals))}_{n_recommendations}"
     cache_timestamp_key = f"{cache_key}_timestamp"
     
-    # Check if cache is still valid (30 minutes TTL)
-    import time
+    # Check if cache is still valid (15 minutes TTL for dynamic recommendations)
     current_time = time.time()
     if (cache_key in st.session_state and 
         cache_timestamp_key in st.session_state and
-        current_time - st.session_state[cache_timestamp_key] < 1800):  # 30 minutes
+        current_time - st.session_state[cache_timestamp_key] < 900):  # 15 minutes
         return st.session_state[cache_key]
     
-    if not user_ratings or len(user_ratings) == 0:
-        # For completely new users, use content-based with default profile
+    num_ratings = len([r for r in user_ratings.values() if r > 0])
+    
+    if not user_ratings or num_ratings == 0:
+        # For completely new users, check for implicit signals
+        if implicit_signals:
+            # Use implicit signals to bootstrap content-based recommendations
+            try:
+                result = get_content_based_recommendations_with_implicit(df, {}, implicit_signals, n_recommendations)
+                st.session_state[cache_key] = result
+                st.session_state[cache_timestamp_key] = current_time
+                return result
+            except:
+                pass
+        
+        # Fallback to pure content-based with default profile
         try:
-            result = get_content_based_recommendations(df, {}, n_recommendations)
+            result = get_content_based_recommendations(df, {}, n_recommendations, implicit_signals)
             st.session_state[cache_key] = result
+            st.session_state[cache_timestamp_key] = current_time
             return result
         except Exception as e:
             st.error(f"Error getting content-based recommendations: {e}")
             result = df.nlargest(n_recommendations, 'vote_average')
             st.session_state[cache_key] = result
+            st.session_state[cache_timestamp_key] = current_time
             return result
     
-    # Determine the split based on number of ratings
-    num_ratings = len([r for r in user_ratings.values() if r > 0])
+    # Progressive confidence scoring instead of hard thresholds
+    collab_confidence = get_collaborative_confidence(num_ratings, implicit_signals)
+    content_confidence = 1.0 - collab_confidence
     
-    if num_ratings < 3:
-        # For cold start users (few ratings), prioritize content-based
-        content_ratio = 0.7
-        collab_ratio = 0.3
-    elif num_ratings < 10:
-        # For medium experience users, balance both
-        content_ratio = 0.5
-        collab_ratio = 0.5
+    # Ensure minimum contribution from each algorithm when both are viable
+    if collab_confidence > 0.2 and content_confidence > 0.2:
+        collab_ratio = max(0.2, collab_confidence)
+        content_ratio = max(0.2, content_confidence)
+        # Normalize to sum to 1
+        total = collab_ratio + content_ratio
+        collab_ratio /= total
+        content_ratio /= total
     else:
-        # For experienced users, prioritize collaborative filtering
-        content_ratio = 0.3
-        collab_ratio = 0.7
+        collab_ratio = collab_confidence
+        content_ratio = content_confidence
     
     # Calculate how many recommendations from each algorithm
     content_count = max(1, int(n_recommendations * content_ratio))
@@ -456,8 +630,8 @@ def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
         st.error(f"Error getting content-based recommendations: {e}")
     
     try:
-        # Get collaborative filtering recommendations
-        collab_recs = get_recommendations(df, user_ratings, collab_count * 2)  # Get more to allow for deduplication
+        # Get collaborative filtering recommendations with implicit signals
+        collab_recs = get_recommendations(df, user_ratings, collab_count * 2, None, implicit_signals)  # Get more to allow for deduplication
         
         for _, movie in collab_recs.iterrows():
             if len(recommendations) >= n_recommendations:
@@ -594,6 +768,15 @@ def show_login_page():
 def display_movie_card(movie, clickable=True, context=""):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
     
+    # Track movie view for session-based recommendations
+    if 'id' in movie and pd.notna(movie['id']):
+        track_session_interaction('movie_view', movie_id=int(movie['id']))
+        # Track genre interests
+        if pd.notna(movie.get('genre')):
+            genres = [g.strip() for g in str(movie['genre']).split(',') if g.strip()]
+            for genre in genres[:2]:  # Track top 2 genres to avoid spam
+                track_session_interaction('genre_interest', genre=genre)
+    
     # Get poster URL if movie has an ID (with lazy loading)
     poster_url = None
     if 'id' in movie and pd.notna(movie['id']):
@@ -669,6 +852,9 @@ def display_movie_card(movie, clickable=True, context=""):
     if clickable:
         unique_key = f"rate_{movie_id}_{context}" if context else f"rate_{movie_id}"
         if st.button("Rate Movie", key=unique_key, type="primary", use_container_width=True):
+            # Track modal opening for session-based recommendations
+            if 'id' in movie and pd.notna(movie['id']):
+                track_session_interaction('modal_open', movie_id=int(movie['id']))
             st.session_state.selected_movie = movie
             st.session_state.show_modal = True
             st.rerun()
@@ -792,13 +978,19 @@ def display_movie_modal(movie, df):
     
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # Show personalized recommendations if user has rated 3+ movies
+    # Show personalized recommendations based on progressive confidence
     num_ratings = len([rating for rating in user_ratings.values() if rating > 0])
+    implicit_signals = calculate_implicit_signals()
+    collab_confidence = get_collaborative_confidence(num_ratings, implicit_signals)
     
-    # Debug info (you can remove this later)
-    st.markdown(f"<p style='color: #666; font-size: 0.8rem; text-align: center; margin: 1rem 0;'>Debug: You have rated {num_ratings} movies. Collaborative filtering {'ACTIVE' if num_ratings >= 3 else 'needs ' + str(3 - num_ratings) + ' more ratings'}</p>", unsafe_allow_html=True)
+    # Enhanced debug info showing confidence levels
+    confidence_text = f"Confidence: {collab_confidence:.1%}"
+    if implicit_signals:
+        confidence_text += f" (boosted by {len(implicit_signals)} session interactions)"
     
-    if num_ratings >= 3:
+    st.markdown(f"<p style='color: #666; font-size: 0.8rem; text-align: center; margin: 1rem 0;'>Debug: {num_ratings} rated movies • {confidence_text} • {'Hybrid' if collab_confidence > 0.4 else 'Content-based'} recommendations</p>", unsafe_allow_html=True)
+    
+    if collab_confidence > 0.4:  # Dynamic threshold instead of hard 3-rating rule
         st.markdown('<div class="recommendations-section" style="margin-top: 1rem;">', unsafe_allow_html=True)
         st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 More Recommendations for You</h3>", unsafe_allow_html=True)
         
@@ -835,6 +1027,14 @@ def main():
         st.session_state.movie_df_cache = None
     if 'poster_cache' not in st.session_state:
         st.session_state.poster_cache = {}
+    if 'session_data' not in st.session_state:
+        st.session_state.session_data = {
+            'movie_views': [],
+            'modal_opens': [],
+            'search_queries': [],
+            'genre_interests': {},
+            'session_start': time.time()
+        }
     
     # Check if user is logged in
     if not st.session_state.current_user:
@@ -901,18 +1101,29 @@ def main():
     
     with search_col1:
         # Auto-focus search if coming from modal
-        placeholder_text = "Enter movie name, genre, or keywords..."
+        placeholder_text = "Try: 'action movies', 'Marvel', 'comedy 2020'..."
         if 'focus_search' in st.session_state and st.session_state.focus_search:
             st.session_state.focus_search = False
             
         search_term = st.text_input(
-            "🔍 Search movies by title, genre, or description",
+            "🔍 Intelligent Search - powered by TF-IDF",
             placeholder=placeholder_text,
-            key="movie_search"
+            key="movie_search",
+            help="Search by title, genre, plot, or any keywords. Uses AI for better results!"
         )
+        
+        # Show search suggestions if user has typed something
+        if search_term and len(search_term) >= 2:
+            suggestions = get_search_suggestions(df, search_term, max_suggestions=3)
+            if suggestions and search_term.lower() not in [s.lower() for s in suggestions]:
+                with st.expander("💡 Search Suggestions", expanded=False):
+                    for suggestion in suggestions:
+                        if st.button(f"🎬 {suggestion}", key=f"suggest_{suggestion}", use_container_width=True):
+                            st.session_state.movie_search = suggestion
+                            st.rerun()
     
     with search_col2:
-        search_button = st.button("Search", type="primary")
+        search_button = st.button("🔍 Search", type="primary")
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -927,21 +1138,62 @@ def main():
         search_results = search_movies(df, search_term)
         
         if not search_results.empty:
-            st.markdown(f'<div class="section-header">🔍 Search Results ({len(search_results)} movies found)</div>', unsafe_allow_html=True)
+            # Show enhanced search results header with TF-IDF indicator
+            results_text = f"🔍 Smart Search Results ({len(search_results)} movies found)"
+            if 'search_similarity' in search_results.columns:
+                avg_relevance = search_results['search_similarity'].mean() * 100
+                results_text += f" - Avg Relevance: {avg_relevance:.1f}%"
+            
+            st.markdown(f'<div class="section-header">{results_text}</div>', unsafe_allow_html=True)
+            
+            # Show search method used
+            search_method = "TF-IDF Content Search" if 'search_similarity' in search_results.columns else "Basic Text Search"
+            st.markdown(f'<p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">Using: {search_method} | Query: "{search_term}"</p>', unsafe_allow_html=True)
             
             # Paginate search results
             paginated_search = paginate_dataframe(search_results, st.session_state.current_page, st.session_state.movies_per_page)
             
-            # Display search results
+            # Display search results with relevance info
             search_cols = st.columns(4)
             for idx, (_, movie) in enumerate(paginated_search.iterrows()):
                 with search_cols[idx % 4]:
+                    # Add relevance score if available
+                    if 'search_similarity' in movie and pd.notna(movie['search_similarity']):
+                        relevance_score = movie['search_similarity'] * 100
+                        st.markdown(f'<div style="text-align: center; color: #ff4444; font-size: 0.8rem; margin-bottom: 0.5rem;">Relevance: {relevance_score:.1f}%</div>', unsafe_allow_html=True)
+                    
                     display_movie_card(movie, clickable=True, context=f"search_{idx}")
             
             # Add pagination controls for search results
             display_pagination_controls(len(search_results), st.session_state.current_page, st.session_state.movies_per_page)
+            
         else:
             st.warning(f"No movies found for '{search_term}'")
+            
+            # Suggest alternative searches
+            if len(search_term) >= 3:
+                st.markdown("### 💡 Try these suggestions:")
+                
+                # Get trending searches or popular genres
+                try:
+                    search_engine = create_tfidf_search_engine(df)
+                    trending = search_engine.get_trending_searches()[:5]
+                    
+                    suggestion_cols = st.columns(len(trending) if trending else 3)
+                    for idx, suggestion in enumerate(trending):
+                        with suggestion_cols[idx % len(suggestion_cols)]:
+                            if st.button(f"🎭 {suggestion}", key=f"trending_{idx}"):
+                                st.session_state.movie_search = suggestion
+                                st.rerun()
+                except:
+                    # Fallback suggestions
+                    fallback_suggestions = ["Action", "Comedy", "Drama", "Horror", "Romance"]
+                    suggestion_cols = st.columns(5)
+                    for idx, genre in enumerate(fallback_suggestions):
+                        with suggestion_cols[idx]:
+                            if st.button(f"🎭 {genre}", key=f"fallback_{idx}"):
+                                st.session_state.movie_search = f"{genre} movies"
+                                st.rerun()
     
     # Only show trending if no search is active
     if not search_term:

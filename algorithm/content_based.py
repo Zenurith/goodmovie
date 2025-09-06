@@ -54,13 +54,15 @@ class ContentBasedRecommender:
         self.genre_list = self._extract_all_genres()
         self.user_profile = None
         self._feature_cache = {}  # Cache for feature extraction
+        self.implicit_signals = {}  # Store implicit signals from session
         
         # Precompute movie features for better performance
         self._build_movie_features()
         
-    def update_user_ratings(self, user_ratings: Dict[str, int]) -> None:
-        """Update user ratings and rebuild user profile."""
+    def update_user_ratings(self, user_ratings: Dict[str, int], implicit_signals: Dict[str, float] = None) -> None:
+        """Update user ratings and rebuild user profile with optional implicit signals."""
         self.user_ratings = user_ratings.copy()
+        self.implicit_signals = implicit_signals or {}
         self.user_profile = None  # Reset profile to rebuild
         
     def _extract_all_genres(self) -> List[str]:
@@ -208,12 +210,12 @@ class ContentBasedRecommender:
         
     def build_user_profile(self) -> Dict[str, float]:
         """
-        Build user preference profile from their ratings.
+        Build user preference profile from their ratings and implicit signals.
         
         For cold start (few ratings), this creates a robust profile that can
-        generalize well to unseen movies.
+        generalize well to unseen movies using session-based signals.
         """
-        if not self.user_ratings:
+        if not self.user_ratings and not self.implicit_signals:
             return self._get_default_profile()
             
         if self.user_profile is not None:
@@ -222,7 +224,7 @@ class ContentBasedRecommender:
         profile = defaultdict(float)
         total_weight = 0
         
-        # Analyze rated movies
+        # Analyze explicitly rated movies
         for movie_id, rating in self.user_ratings.items():
             movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
             
@@ -235,6 +237,30 @@ class ContentBasedRecommender:
             if weight <= 0:
                 continue
                 
+            # Extract features for this movie
+            movie_features = self._extract_movie_features(movie)
+            
+            # Update profile with weighted features
+            for feature_name, feature_value in movie_features.items():
+                profile[feature_name] += weight * feature_value
+                
+            total_weight += weight
+            
+        # Incorporate implicit signals from session data
+        for movie_id, signal_strength in self.implicit_signals.items():
+            # Skip if already have explicit rating for this movie
+            if movie_id in self.user_ratings:
+                continue
+                
+            movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
+            
+            if movie_row.empty:
+                continue
+                
+            movie = movie_row.iloc[0]
+            # Convert implicit signal to weight (lower than explicit ratings)
+            weight = signal_strength * 0.3  # Scale down implicit signals
+            
             # Extract features for this movie
             movie_features = self._extract_movie_features(movie)
             
@@ -688,7 +714,7 @@ def create_content_based_recommender(df: pd.DataFrame) -> ContentBasedRecommende
 
 
 def get_content_based_recommendations(df: pd.DataFrame, user_ratings: Dict[str, int], 
-                                    n_recommendations: int = 10) -> pd.DataFrame:
+                                    n_recommendations: int = 10, implicit_signals: Dict[str, float] = None) -> pd.DataFrame:
     """
     Get content-based recommendations optimized for cold start scenarios.
     
@@ -696,10 +722,11 @@ def get_content_based_recommendations(df: pd.DataFrame, user_ratings: Dict[str, 
         df: Movie dataset DataFrame
         user_ratings: Dictionary of movie_id -> rating
         n_recommendations: Number of recommendations to return
+        implicit_signals: Optional dictionary of movie_id -> signal_strength from session data
         
     Returns:
         DataFrame with recommended movies and content scores
     """
     recommender = create_content_based_recommender(df)
-    recommender.update_user_ratings(user_ratings)
+    recommender.update_user_ratings(user_ratings, implicit_signals)
     return recommender.get_recommendations(n_recommendations)

@@ -34,10 +34,17 @@ class CollaborativeFilter:
         """Periodically clear caches to prevent memory buildup"""
         import time
         current_time = time.time()
-        if current_time - self._last_cache_clear > 1800:  # Clear every 30 minutes
-            self._similarity_cache.clear()
-            self._matrix_cache.clear()
-            self._profile_cache.clear()
+        if current_time - self._last_cache_clear > 900:  # Clear every 15 minutes for better memory management
+            # Clear caches but keep some recent entries
+            if len(self._similarity_cache) > 10:
+                self._similarity_cache.clear()
+            if len(self._matrix_cache) > 5:
+                self._matrix_cache.clear()
+            if len(self._profile_cache) > 20:
+                # Keep only the 10 most recent entries
+                recent_items = list(self._profile_cache.items())[-10:]
+                self._profile_cache.clear()
+                self._profile_cache.update(recent_items)
             self._last_cache_clear = current_time
     
     def _load_users_data(self, users_file_path: str = None) -> Dict[str, Dict[str, int]]:
@@ -175,20 +182,40 @@ class CollaborativeFilter:
         
         return result
     
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=64)  # Reduced cache size for memory efficiency
     def _calculate_user_similarity(self, user_item_matrix_hash: int, target_user: str) -> pd.Series:
         """
-        Calculate similarity between target user and all other users with caching.
+        Calculate similarity between target user and all other users with caching and optimization.
         """
         if target_user not in self.user_item_matrix.index:
             return pd.Series(dtype=float)
         
         target_ratings = self.user_item_matrix.loc[target_user].values.reshape(1, -1)
         
-        # Calculate cosine similarity with all users
-        similarities = cosine_similarity(target_ratings, self.user_item_matrix.values)[0]
+        # Only calculate similarity with users who have sufficient overlap
+        # Pre-filter users with at least 2 movies in common for performance
+        target_nonzero = target_ratings[0] != 0
+        sufficient_overlap_users = []
         
-        return pd.Series(similarities, index=self.user_item_matrix.index)
+        for idx, user in enumerate(self.user_item_matrix.index):
+            if user != target_user:
+                other_nonzero = self.user_item_matrix.iloc[idx].values != 0
+                overlap = np.sum(target_nonzero & other_nonzero)
+                if overlap >= 2:  # At least 2 movies in common
+                    sufficient_overlap_users.append(idx)
+        
+        if not sufficient_overlap_users:
+            return pd.Series(dtype=float)
+        
+        # Calculate cosine similarity only for users with sufficient overlap
+        other_users_matrix = self.user_item_matrix.iloc[sufficient_overlap_users].values
+        similarities = cosine_similarity(target_ratings, other_users_matrix)[0]
+        
+        # Create full similarity series with zeros for users without sufficient overlap
+        all_similarities = np.zeros(len(self.user_item_matrix))
+        all_similarities[sufficient_overlap_users] = similarities
+        
+        return pd.Series(all_similarities, index=self.user_item_matrix.index)
     
     def _build_item_similarity_matrix(self) -> np.ndarray:
         """
@@ -304,11 +331,19 @@ class CollaborativeFilter:
                 all_users_data = self._load_users_data()
             
             # If we have multiple users' data, use collaborative filtering
-            if all_users_data and len(all_users_data) > 3:  # Need at least 4 users for good CF
+            if all_users_data and len(all_users_data) > 1:  # Reduced threshold - only need 2+ users
                 result = self._get_fast_collaborative_recommendations(n_recommendations, all_users_data)
+                
+                # If collaborative filtering returns empty results, fall back to content-based
+                if result.empty:
+                    result = self._get_content_based_recommendations(n_recommendations)
             else:
                 # Fall back to content-based recommendations for speed
                 result = self._get_content_based_recommendations(n_recommendations)
+                
+            # Final fallback if all methods fail
+            if result.empty:
+                result = self._get_fallback_recommendations(n_recommendations)
             
             # Cache result (limit cache size)
             if len(self._profile_cache) < 50:
@@ -1088,13 +1123,40 @@ def load_users_data(users_file_path: str = None) -> Dict[str, Dict[str, int]]:
 
 def get_recommendations(df: pd.DataFrame, user_ratings: Dict[str, int], 
                        n_recommendations: int = 5, 
-                       all_users_data: Optional[Dict[str, Dict[str, int]]] = None) -> pd.DataFrame:
-    """Get movie recommendations using improved hybrid collaborative filtering."""
+                       all_users_data: Optional[Dict[str, Dict[str, int]]] = None,
+                       implicit_signals: Optional[Dict[str, float]] = None) -> pd.DataFrame:
+    """Get movie recommendations using improved hybrid collaborative filtering with confidence scoring."""
     recommender = create_recommender(df)
     recommender.update_user_ratings(user_ratings)
     
-    # Automatically load user data if not provided
-    return recommender.get_recommendations(n_recommendations, all_users_data)
+    # Enhanced recommendations with confidence scoring
+    result = recommender.get_recommendations(n_recommendations, all_users_data)
+    
+    # Add confidence score to the results
+    if not result.empty:
+        confidence = get_collaborative_confidence(len([r for r in user_ratings.values() if r > 0]), implicit_signals)
+        result['collaborative_confidence'] = confidence
+        result['recommendation_method'] = 'hybrid' if confidence > 0.4 else 'content_fallback'
+    
+    return result
+
+def get_collaborative_confidence(num_ratings: int, implicit_signals: Optional[Dict[str, float]] = None) -> float:
+    """Calculate confidence score for collaborative filtering recommendations."""
+    if num_ratings == 0:
+        return 0.0
+    elif num_ratings == 1:
+        base_confidence = 0.2
+    elif num_ratings == 2:
+        base_confidence = 0.4
+    else:
+        base_confidence = min(0.8 + (num_ratings - 3) * 0.05, 1.0)
+    
+    # Boost confidence with implicit signals
+    if implicit_signals:
+        implicit_boost = min(len(implicit_signals) * 0.1, 0.3)
+        base_confidence = min(base_confidence + implicit_boost, 1.0)
+    
+    return base_confidence
 
 
 def get_recommendations_with_users_data(df: pd.DataFrame, user_ratings: Dict[str, int], 
