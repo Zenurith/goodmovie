@@ -956,7 +956,7 @@ def display_movie_modal(movie, df):
     # Show content-based "You may also like" recommendations
     st.markdown('<div class="recommendations-section">', unsafe_allow_html=True)
     st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎬 You May Also Like</h3>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color: #cccccc; margin-bottom: 1rem; font-style: italic;'>Movies similar to <strong>{movie['title']}</strong> based on genres, ratings, and content features</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color: #cccccc; margin-bottom: 1rem; font-style: italic;'>Movies similar to <strong>{movie['title']}</strong></p>", unsafe_allow_html=True)
     
     # Get similar movies using content-based algorithm
     from algorithm.content_based import create_content_based_recommender
@@ -983,12 +983,6 @@ def display_movie_modal(movie, df):
     implicit_signals = calculate_implicit_signals()
     collab_confidence = get_collaborative_confidence(num_ratings, implicit_signals)
     
-    # Enhanced debug info showing confidence levels
-    confidence_text = f"Confidence: {collab_confidence:.1%}"
-    if implicit_signals:
-        confidence_text += f" (boosted by {len(implicit_signals)} session interactions)"
-    
-    st.markdown(f"<p style='color: #666; font-size: 0.8rem; text-align: center; margin: 1rem 0;'>Debug: {num_ratings} rated movies • {confidence_text} • {'Hybrid' if collab_confidence > 0.4 else 'Content-based'} recommendations</p>", unsafe_allow_html=True)
     
     if collab_confidence > 0.4:  # Dynamic threshold instead of hard 3-rating rule
         st.markdown('<div class="recommendations-section" style="margin-top: 1rem;">', unsafe_allow_html=True)
@@ -1106,10 +1100,9 @@ def main():
             st.session_state.focus_search = False
             
         search_term = st.text_input(
-            "🔍 Intelligent Search - powered by TF-IDF",
+            "🔍 Search movies by title, genre, or description",
             placeholder=placeholder_text,
-            key="movie_search",
-            help="Search by title, genre, plot, or any keywords. Uses AI for better results!"
+            key="movie_search"
         )
         
         # Show search suggestions if user has typed something
