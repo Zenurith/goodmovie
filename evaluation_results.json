@@ -1,0 +1,41 @@
+{
+  "evaluation_summary": {
+    "dataset_info": {
+      "total_movies": 9985,
+      "total_users": 38,
+      "total_ratings": 277,
+      "sparsity": 99.92699575679308
+    },
+    "rating_prediction": {
+      "mae": 1.4401810587043076,
+      "rmse": 2.0824362033059174,
+      "total_predictions": 63
+    },
+    "ranking_metrics": {
+      "5": {
+        "precision": 0.15625,
+        "recall": 0.4125,
+        "f1": 0.2127232142857143,
+        "ndcg": 0.30256278026236344,
+        "num_users": 32
+      },
+      "10": {
+        "precision": 0.10312500000000001,
+        "recall": 0.48005952380952377,
+        "f1": 0.16018442341971753,
+        "ndcg": 0.33521928896565145,
+        "num_users": 32
+      }
+    },
+    "coverage_diversity": {
+      "catalog_coverage": 0.013219829744616926,
+      "unique_movies_recommended": 132,
+      "avg_genre_diversity": 7.787878787878788
+    },
+    "user_similarity": {
+      "avg_similarity": NaN,
+      "max_similarity": 0.0,
+      "min_similarity": 0
+    }
+  }
+}

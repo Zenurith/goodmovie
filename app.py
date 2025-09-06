@@ -5,7 +5,7 @@ from PIL import Image
 import io
 import json
 import os
-from algorithm import get_recommendations
+from algorithm import get_recommendations, get_content_based_recommendations
 from user_manager import get_user_manager
 
 # Page configuration
@@ -337,6 +337,104 @@ def collaborative_filtering_recommendations(df, user_ratings, n_recommendations=
     """
     return get_recommendations(df, user_ratings, n_recommendations)
 
+def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
+    """
+    Get hybrid recommendations combining collaborative filtering and content-based filtering.
+    
+    Args:
+        df: Movie dataframe
+        user_ratings: Dictionary of user ratings
+        n_recommendations: Number of recommendations to return
+        
+    Returns:
+        DataFrame with recommended movies from both algorithms
+    """
+    if not user_ratings or len(user_ratings) == 0:
+        # For completely new users, use content-based with default profile
+        try:
+            return get_content_based_recommendations(df, {}, n_recommendations)
+        except Exception as e:
+            st.error(f"Error getting content-based recommendations: {e}")
+            return df.nlargest(n_recommendations, 'vote_average')
+    
+    # Determine the split based on number of ratings
+    num_ratings = len([r for r in user_ratings.values() if r > 0])
+    
+    if num_ratings < 3:
+        # For cold start users (few ratings), prioritize content-based
+        content_ratio = 0.7
+        collab_ratio = 0.3
+    elif num_ratings < 10:
+        # For medium experience users, balance both
+        content_ratio = 0.5
+        collab_ratio = 0.5
+    else:
+        # For experienced users, prioritize collaborative filtering
+        content_ratio = 0.3
+        collab_ratio = 0.7
+    
+    # Calculate how many recommendations from each algorithm
+    content_count = max(1, int(n_recommendations * content_ratio))
+    collab_count = max(1, int(n_recommendations * collab_ratio))
+    
+    # Ensure we don't exceed the requested number
+    if content_count + collab_count > n_recommendations:
+        if content_ratio > collab_ratio:
+            content_count = n_recommendations - collab_count
+        else:
+            collab_count = n_recommendations - content_count
+    
+    recommendations = []
+    seen_movies = set()
+    
+    try:
+        # Get content-based recommendations
+        content_recs = get_content_based_recommendations(df, user_ratings, content_count * 2)  # Get more to allow for deduplication
+        
+        for _, movie in content_recs.iterrows():
+            if len(recommendations) >= content_count:
+                break
+            movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
+            if movie_id not in seen_movies and movie_id not in user_ratings:
+                movie['recommendation_source'] = 'content_based'
+                recommendations.append(movie)
+                seen_movies.add(movie_id)
+    except Exception as e:
+        st.error(f"Error getting content-based recommendations: {e}")
+    
+    try:
+        # Get collaborative filtering recommendations
+        collab_recs = get_recommendations(df, user_ratings, collab_count * 2)  # Get more to allow for deduplication
+        
+        for _, movie in collab_recs.iterrows():
+            if len(recommendations) >= n_recommendations:
+                break
+            movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
+            if movie_id not in seen_movies and movie_id not in user_ratings:
+                movie['recommendation_source'] = 'collaborative'
+                recommendations.append(movie)
+                seen_movies.add(movie_id)
+    except Exception as e:
+        st.error(f"Error getting collaborative recommendations: {e}")
+    
+    # If we still don't have enough recommendations, fill with popular movies
+    if len(recommendations) < n_recommendations:
+        popular_movies = df.nlargest(n_recommendations * 2, 'vote_average')
+        for _, movie in popular_movies.iterrows():
+            if len(recommendations) >= n_recommendations:
+                break
+            movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
+            if movie_id not in seen_movies and movie_id not in user_ratings:
+                movie['recommendation_source'] = 'popular'
+                recommendations.append(movie)
+                seen_movies.add(movie_id)
+    
+    if recommendations:
+        return pd.DataFrame(recommendations[:n_recommendations])
+    else:
+        # Fallback to top-rated movies
+        return df.nlargest(n_recommendations, 'vote_average')
+
 def display_pagination_controls(total_items, current_page, items_per_page):
     """Display pagination controls with Previous/Next buttons"""
     total_pages = (total_items - 1) // items_per_page + 1
@@ -389,18 +487,6 @@ def show_login_page():
     with tab1:
         st.markdown("### Welcome Back!")
         
-        # Show existing users for convenience
-        existing_users = user_manager.get_all_users()
-        if existing_users:
-            st.markdown("**Existing users:**")
-            cols = st.columns(min(len(existing_users), 4))
-            for i, username in enumerate(existing_users[:8]):  # Show up to 8 users
-                with cols[i % 4]:
-                    if st.button(f"Login as {username}", key=f"quick_login_{username}"):
-                        if user_manager.login_user(username):
-                            st.session_state.current_user = username
-                            st.success(f"Welcome back, {username}!")
-                            st.rerun()
         
         st.markdown("---")
         login_username = st.text_input("Username", placeholder="Enter your username", key="login_username")
@@ -446,7 +532,7 @@ def show_login_page():
     with col3:
         st.metric("Avg Ratings/User", stats["average_ratings_per_user"])
 
-def display_movie_card(movie, clickable=True):
+def display_movie_card(movie, clickable=True, context=""):
     movie_id = str(movie['id']) if 'id' in movie and pd.notna(movie['id']) else str(movie['title'])
     
     # Get poster URL if movie has an ID
@@ -518,7 +604,8 @@ def display_movie_card(movie, clickable=True):
     
     # Add the rate movie button
     if clickable:
-        if st.button("Rate Movie", key=f"rate_{movie_id}", type="primary", use_container_width=True):
+        unique_key = f"rate_{movie_id}_{context}" if context else f"rate_{movie_id}"
+        if st.button("Rate Movie", key=unique_key, type="primary", use_container_width=True):
             st.session_state.selected_movie = movie
             st.session_state.show_modal = True
             st.rerun()
@@ -618,13 +705,13 @@ def display_movie_modal(movie, df):
         st.markdown('<div class="recommendations-section">', unsafe_allow_html=True)
         st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 Recommended for You</h3>", unsafe_allow_html=True)
         
-        recommendations = get_recommendations(df, user_ratings, 4)
+        recommendations = get_hybrid_recommendations(df, user_ratings, 4)
         
         if not recommendations.empty:
             rec_cols = st.columns(4)
             for idx, (_, rec_movie) in enumerate(recommendations.iterrows()):
                 with rec_cols[idx]:
-                    display_movie_card(rec_movie, clickable=True)
+                    display_movie_card(rec_movie, clickable=True, context=f"rec_{idx}")
         else:
             st.write("Rate more movies to get better recommendations!")
         
@@ -740,7 +827,7 @@ def main():
             search_cols = st.columns(4)
             for idx, (_, movie) in enumerate(paginated_search.iterrows()):
                 with search_cols[idx % 4]:
-                    display_movie_card(movie, clickable=True)
+                    display_movie_card(movie, clickable=True, context=f"search_{idx}")
             
             # Add pagination controls for search results
             display_pagination_controls(len(search_results), st.session_state.current_page, st.session_state.movies_per_page)
@@ -762,7 +849,7 @@ def main():
         cols = st.columns(4)
         for idx, (_, movie) in enumerate(paginated_trending.iterrows()):
             with cols[idx % 4]:
-                display_movie_card(movie, clickable=True)
+                display_movie_card(movie, clickable=True, context=f"trending_{idx}")
         
         # Add pagination controls for trending movies
         display_pagination_controls(len(trending_movies), st.session_state.current_page, st.session_state.movies_per_page)
@@ -773,13 +860,13 @@ def main():
     
     if len(rated_movies) >= 2 and not search_term:
         st.markdown('<div class="section-header">🎯 Recommended for You</div>', unsafe_allow_html=True)
-        recommendations = get_recommendations(df, user_ratings, 8)
+        recommendations = get_hybrid_recommendations(df, user_ratings, 8)
         
         if not recommendations.empty:
             rec_cols = st.columns(4)
             for idx, (_, rec_movie) in enumerate(recommendations.head(8).iterrows()):
                 with rec_cols[idx % 4]:
-                    display_movie_card(rec_movie, clickable=True)
+                    display_movie_card(rec_movie, clickable=True, context=f"home_rec_{idx}")
     
     # Sidebar filters (only show if no search is active)
     if not search_term:
@@ -819,7 +906,7 @@ def main():
             cols4 = st.columns(4)
             for idx, (_, movie) in enumerate(paginated_filtered.iterrows()):
                 with cols4[idx % 4]:
-                    display_movie_card(movie, clickable=True)
+                    display_movie_card(movie, clickable=True, context=f"filtered_{idx}")
             
             # Add pagination controls for filtered results
             display_pagination_controls(len(filtered_movies), st.session_state.current_page, st.session_state.movies_per_page)
