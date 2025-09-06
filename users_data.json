@@ -570,10 +570,30 @@
       "created_at": "2025-09-06T14:35:23.760849",
       "last_login": "2025-09-06T14:35:23.760859",
       "total_movies_rated": 1
+    },
+    "jin": {
+      "ratings": {
+        "240": 10,
+        "101": 9,
+        "278": 10,
+        "769": 10,
+        "238": 9
+      },
+      "created_at": "2025-09-06T14:39:38.358410",
+      "last_login": "2025-09-06T14:39:38.358420",
+      "total_movies_rated": 5
+    },
+    "gut": {
+      "ratings": {
+        "634649": 9
+      },
+      "created_at": "2025-09-06T15:15:56.113826",
+      "last_login": "2025-09-06T15:15:56.113832",
+      "total_movies_rated": 1
     }
   },
   "metadata": {
-    "total_users": 41,
+    "total_users": 43,
     "created_at": "2025-09-04T22:04:55.841232"
   }
 }
