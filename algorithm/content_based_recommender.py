@@ -23,6 +23,7 @@ from pathlib import Path
 
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
 import difflib
 import warnings
 
@@ -35,7 +36,7 @@ class RecommendationConfig:
     dataset_path: Optional[str] = None
     cache_dir: str = "cache"
     similarity_method: str = "cosine"  # cosine, euclidean
-    default_n_recommendations: int = 10
+    default_n_recommendations: int = 8
     default_min_rating: float = 5.0
     default_min_votes: int = 50
     fuzzy_search_threshold: int = 70
@@ -172,21 +173,122 @@ class ContentBasedRecommender:
     def _prepare_features(self):
         """Prepare feature matrix from the dataset"""
         try:
-            # Get feature columns (exclude non-feature columns)
-            exclude_cols = ['id', 'title', 'overview', 'tagline', 'release_date']
-            feature_cols = [col for col in self.movies_df.columns if col not in exclude_cols]
-            
-            self.logger.info(f"Using {len(feature_cols)} features for similarity computation")
-            
-            # Fill missing values and scale features
-            feature_data = self.movies_df[feature_cols].fillna(0)
-            self.feature_matrix = self.scaler.fit_transform(feature_data)
-            
-            self.logger.info(f"Feature matrix shape: {self.feature_matrix.shape}")
+            # Handle raw CSV format with categorical data (like dataset/movies.csv)
+            if 'genre' in self.movies_df.columns and self.movies_df['genre'].dtype == 'object':
+                self._prepare_features_from_raw_csv()
+            else:
+                # Handle pre-processed numerical features
+                self._prepare_features_from_processed_csv()
             
         except Exception as e:
             self.logger.error(f"Failed to prepare features: {e}")
             raise DatasetError(f"Failed to prepare features: {e}")
+    
+    def _prepare_features_from_raw_csv(self):
+        """Prepare features from raw CSV - Multi-feature approach: title, genre, popularity, rating"""
+        # Create separate feature vectors for all components
+        title_features = []
+        genre_features = []
+        
+        for i in range(len(self.movies_df)):
+            # Title keywords repeated 5 times for strong weight
+            title_keywords = self._extract_title_keywords(self.movies_df.iloc[i]['title'])
+            title_text = ' '.join([title_keywords] * 5)
+            title_features.append(title_text)
+            
+            # Genre repeated 3 times for moderate weight
+            genre_text = ' '.join([str(self.movies_df.iloc[i]['genre']) if 'genre' in self.movies_df.columns else ''] * 3)
+            genre_features.append(genre_text)
+        
+        # Create TF-IDF for title (most important)
+        title_tfidf = TfidfVectorizer(
+            max_features=2000,
+            stop_words='english', 
+            min_df=1,
+            ngram_range=(1, 2)
+        )
+        title_matrix = title_tfidf.fit_transform(title_features)
+        
+        # Create TF-IDF for genre 
+        genre_tfidf = TfidfVectorizer(
+            max_features=500,
+            min_df=1,
+            ngram_range=(1, 2)
+        )
+        genre_matrix = genre_tfidf.fit_transform(genre_features)
+        
+        # Prepare numerical features (popularity and rating)
+        numerical_features = []
+        for col in ['popularity', 'vote_average']:
+            if col in self.movies_df.columns:
+                numerical_features.append(col)
+        
+        # Multi-feature weighting: title, genre, popularity, rating
+        title_weight = 0.60    # Still dominant for franchise matching
+        genre_weight = 0.25    # Important for content 
+          
+        numerical_weight = 0.15 # Popularity + rating for quality boost
+        
+        feature_matrices = []
+        
+        # Add title features (scaled)
+        title_scaled = title_matrix.toarray() * title_weight
+        feature_matrices.append(title_scaled)
+        
+        # Add genre features (scaled)
+        genre_scaled = genre_matrix.toarray() * genre_weight
+        feature_matrices.append(genre_scaled)
+        
+        # Add numerical features if available
+        if numerical_features:
+            numerical_data = self.movies_df[numerical_features].fillna(0)
+            numerical_scaled = self.scaler.fit_transform(numerical_data) * numerical_weight
+            feature_matrices.append(numerical_scaled)
+            
+            self.logger.info(f"Added numerical features: {numerical_features}")
+        else:
+            self.logger.warning("No numerical features (popularity, vote_average) found")
+        
+        # Combine all feature matrices
+        self.feature_matrix = np.hstack(feature_matrices)
+        
+        self.logger.info(f"Multi-feature matrix shape: {self.feature_matrix.shape}")
+        self.logger.info(f"Weights - Title: {title_weight}, Genre: {genre_weight}, Numerical: {numerical_weight}")
+        
+        if len(feature_matrices) >= 3:
+            self.logger.info(f"Title: {title_scaled.shape[1]}, Genre: {genre_scaled.shape[1]}, Numerical: {numerical_scaled.shape[1]}")
+        else:
+            self.logger.info(f"Title: {title_scaled.shape[1]}, Genre: {genre_scaled.shape[1]}")
+    
+    def _extract_title_keywords(self, title):
+        """Extract key words from movie title"""
+        import re
+        
+        # Remove common subtitle patterns
+        title = re.sub(r':\s*Part\s+\d+', '', title, flags=re.IGNORECASE)
+        title = re.sub(r':\s*Chapter\s+\d+', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s+\d+$', '', title)  # Remove trailing numbers
+        title = re.sub(r'\s+\(\d{4}\)$', '', title)  # Remove year in parentheses
+        
+        # Remove common words but keep franchise names
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        words = [word.lower() for word in title.split() if word.lower() not in stop_words and len(word) > 2]
+        
+        return ' '.join(words)
+    
+    def _prepare_features_from_processed_csv(self):
+        """Prepare features from pre-processed CSV with numerical data"""
+        # Get feature columns (exclude non-feature columns)
+        exclude_cols = ['id', 'title', 'overview', 'tagline', 'release_date', 'combined_features']
+        feature_cols = [col for col in self.movies_df.columns if col not in exclude_cols]
+        
+        self.logger.info(f"Using {len(feature_cols)} features for similarity computation")
+        
+        # Fill missing values and scale features
+        feature_data = self.movies_df[feature_cols].fillna(0)
+        self.feature_matrix = self.scaler.fit_transform(feature_data)
+        
+        self.logger.info(f"Feature matrix shape: {self.feature_matrix.shape}")
     
     def _get_cache_filename(self, cache_type: str) -> str:
         """Generate cache filename based on data characteristics"""
@@ -258,7 +360,7 @@ class ContentBasedRecommender:
     
     def fuzzy_search_movie(self, title: str, threshold: float = None) -> Tuple[str, int, int]:
         """
-        Find movie using fuzzy search
+        Enhanced fuzzy search using multiple matching strategies
         
         Args:
             title: Movie title to search for
@@ -271,42 +373,110 @@ class ContentBasedRecommender:
             MovieNotFoundError: If no suitable match is found
         """
         if threshold is None:
-            threshold = self.config.fuzzy_search_threshold / 100.0
-        else:
-            threshold = threshold / 100.0
+            threshold = self.config.fuzzy_search_threshold
         
-        # Try exact match first
-        title_lower = title.lower()
-        if title_lower in self.movie_mappings['title_to_idx']:
-            idx = self.movie_mappings['title_to_idx'][title_lower]
-            return self.movies_df.iloc[idx]['title'], 100, idx
+        title_lower = title.lower().strip()
         
-        # Use difflib for fuzzy matching
+        if len(title_lower) < 2:
+            raise MovieNotFoundError(f"Search query too short: '{title}'")
+        
         matches = []
-        for movie_title in self.movie_mappings['titles']:
-            similarity = difflib.SequenceMatcher(None, title.lower(), movie_title.lower()).ratio()
-            if similarity >= threshold:
-                matches.append((movie_title, int(similarity * 100), self.movie_mappings['titles'].index(movie_title)))
         
-        # Sort by similarity score
-        matches.sort(key=lambda x: x[1], reverse=True)
+        # Strategy 1: Exact substring match (highest priority)
+        for i, movie_title in enumerate(self.movie_mappings['titles']):
+            movie_lower = movie_title.lower()
+            
+            if title_lower == movie_lower:
+                # Perfect exact match
+                return movie_title, 100, i
+            
+            if title_lower in movie_lower:
+                # Substring match - calculate coverage score
+                coverage = len(title_lower) / len(movie_lower) * 100
+                similarity_score = min(95 + coverage, 100)
+                matches.append((movie_title, similarity_score, i))
+                continue
         
+        # Strategy 2: Word-based matching for partial titles
+        if not matches:  # Only if no exact substring matches
+            search_words = title_lower.split()
+            
+            for i, movie_title in enumerate(self.movie_mappings['titles']):
+                movie_lower = movie_title.lower()
+                movie_words = movie_lower.split()
+                
+                word_matches = 0
+                for search_word in search_words:
+                    for movie_word in movie_words:
+                        # Check both partial and full word matches
+                        if (search_word in movie_word or movie_word in search_word) and len(search_word) >= 3:
+                            word_matches += 1
+                            break
+                
+                if word_matches > 0:
+                    # Score based on percentage of words matched
+                    word_score = (word_matches / len(search_words)) * 90
+                    matches.append((movie_title, word_score, i))
+        
+        # Strategy 3: Fuzzy string matching (for typos)
+        if not matches:  # Only if no word matches found
+            for i, movie_title in enumerate(self.movie_mappings['titles']):
+                similarity = difflib.SequenceMatcher(None, title_lower, movie_title.lower()).ratio()
+                if similarity > 0.6:  # Higher threshold for fuzzy matches
+                    fuzzy_score = similarity * 85  # Max 85 for fuzzy matches
+                    matches.append((movie_title, fuzzy_score, i))
+        
+        # Strategy 4: Franchise-aware matching
+        if not matches and len(search_words) > 1:
+            # Try matching against franchise patterns
+            franchise_patterns = {
+                'austin powers': ['austin powers'],
+                'spider man': ['spider-man', 'spiderman'],
+                'iron man': ['iron man'],
+                'fast furious': ['fast', 'furious'],
+                'lord rings': ['lord', 'rings'],
+                'toy story': ['toy story'],
+                'matrix': ['matrix'],
+                'bourne': ['bourne'],
+                'godfather': ['godfather']
+            }
+            
+            search_key = title_lower.replace('-', ' ').strip()
+            
+            for pattern, keywords in franchise_patterns.items():
+                if any(keyword in search_key for keyword in keywords):
+                    for i, movie_title in enumerate(self.movie_mappings['titles']):
+                        movie_lower = movie_title.lower()
+                        if any(keyword in movie_lower for keyword in keywords):
+                            franchise_score = 80
+                            matches.append((movie_title, franchise_score, i))
+        
+        if not matches:
+            # Last resort: very lenient substring matching
+            for i, movie_title in enumerate(self.movie_mappings['titles']):
+                movie_lower = movie_title.lower()
+                if any(word in movie_lower for word in search_words if len(word) >= 4):
+                    matches.append((movie_title, 60, i))
+        
+        # Sort by similarity score and return best match
         if matches:
+            matches.sort(key=lambda x: x[1], reverse=True)
             matched_title, score, idx = matches[0]
-            self.logger.info(f"Fuzzy match: '{title}' -> '{matched_title}' (score: {score}%)")
-            return matched_title, score, idx
+            
+            if score >= threshold:
+                self.logger.info(f"Enhanced fuzzy match: '{title}' -> '{matched_title}' (score: {score:.1f}%)")
+                return matched_title, int(score), idx
         
-        # If no good matches, try partial matching
-        partial_matches = []
+        # If still no good matches, provide helpful suggestions
+        suggestions = []
         for movie_title in self.movie_mappings['titles']:
-            if title.lower() in movie_title.lower() or movie_title.lower() in title.lower():
-                partial_matches.append(movie_title)
+            if any(word in movie_title.lower() for word in search_words if len(word) >= 3):
+                suggestions.append(movie_title)
         
-        if partial_matches:
-            suggestions = partial_matches[:3]
+        if suggestions:
             raise MovieNotFoundError(
-                f"No good match found for '{title}'. "
-                f"Did you mean: {', '.join(suggestions)}?"
+                f"No good match found for '{title}' (threshold: {threshold}%). "
+                f"Did you mean: {', '.join(suggestions[:3])}?"
             )
         else:
             raise MovieNotFoundError(f"No movies found similar to '{title}'")
@@ -364,20 +534,22 @@ class ContentBasedRecommender:
         else:
             sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
         
-        # Apply filters and collect recommendations
+        # Apply filters and collect recommendations with similarity threshold
         recommendations = []
+        min_similarity_threshold = 0.50  # Only recommend movies with >50% similarity
         
         for idx, score in sim_scores:
-            if len(recommendations) >= n_recommendations:
-                break
-                
             movie_data = self.movies_df.iloc[idx]
+            
+            # Skip movies with very low similarity (quality over quantity)
+            if score < min_similarity_threshold:
+                continue
             
             # Get movie rating and votes
             rating = self._get_movie_rating(movie_data)
             votes = movie_data.get('vote_count', 0)
             
-            # Apply filters
+            # Apply basic filters
             if rating < min_rating or votes < min_votes:
                 continue
             
@@ -393,6 +565,10 @@ class ContentBasedRecommender:
                 'similarity': score,
                 'year': self._extract_year(movie_data)
             })
+            
+            # Stop if we have enough high-quality recommendations
+            if len(recommendations) >= n_recommendations:
+                break
         
         self.logger.info(f"Generated {len(recommendations)} recommendations for '{matched_title}'")
         return recommendations
@@ -523,10 +699,18 @@ class ContentBasedRecommender:
     
     def _extract_genres(self, movie_data) -> str:
         """Extract genres from movie data"""
+        # Handle raw CSV format with 'genre' column containing comma-separated values
+        if 'genre' in movie_data.index and pd.notna(movie_data['genre']):
+            return str(movie_data['genre'])
+        
+        # Handle pre-processed format with individual genre columns
         genre_cols = [col for col in movie_data.index if col.startswith('genre_')]
-        active_genres = [col.replace('genre_', '').replace('_', ' ').title() 
-                        for col in genre_cols if movie_data.get(col, 0) == 1]
-        return ', '.join(active_genres[:5]) if active_genres else ""
+        if genre_cols:
+            active_genres = [col.replace('genre_', '').replace('_', ' ').title() 
+                            for col in genre_cols if movie_data.get(col, 0) == 1]
+            return ', '.join(active_genres[:5]) if active_genres else ""
+        
+        return ""
     
     def _extract_year(self, movie_data) -> Optional[int]:
         """Extract year from movie data"""
