@@ -1035,6 +1035,8 @@ def main():
                             st.rerun()
     
     with search_col2:
+        # Add empty label to align button with input field
+        st.markdown('<div style="height: 1.5rem;"></div>', unsafe_allow_html=True)
         search_button = st.button("🔍 Search", type="primary")
     
     st.markdown('</div>', unsafe_allow_html=True)
