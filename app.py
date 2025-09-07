@@ -582,7 +582,7 @@ def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
         st.session_state[cache_timestamp_key] = current_time
         return result
 
-def display_pagination_controls(total_items, current_page, items_per_page):
+def display_pagination_controls(total_items, current_page, items_per_page, key_prefix=""):
     """Display pagination controls with Previous/Next buttons"""
     total_pages = (total_items - 1) // items_per_page + 1
     
@@ -595,22 +595,22 @@ def display_pagination_controls(total_items, current_page, items_per_page):
     
     with col1:
         if current_page > 1:
-            if st.button("◀ Previous", key="prev_page", type="primary"):
+            if st.button("◀ Previous", key=f"{key_prefix}prev_page", type="primary"):
                 st.session_state.current_page = current_page - 1
                 st.rerun()
         else:
-            st.button("◀ Previous", key="prev_page_disabled", disabled=True)
+            st.button("◀ Previous", key=f"{key_prefix}prev_page_disabled", disabled=True)
     
     with col2:
         st.markdown(f'<div class="pagination-info">Page {current_page} of {total_pages}</div>', unsafe_allow_html=True)
     
     with col3:
         if current_page < total_pages:
-            if st.button("Next ▶", key="next_page", type="primary"):
+            if st.button("Next ▶", key=f"{key_prefix}next_page", type="primary"):
                 st.session_state.current_page = current_page + 1
                 st.rerun()
         else:
-            st.button("Next ▶", key="next_page_disabled", disabled=True)
+            st.button("Next ▶", key=f"{key_prefix}next_page_disabled", disabled=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1090,7 +1090,7 @@ def main():
                     display_movie_card(movie, clickable=True, context=f"search_{idx}")
             
             # Add pagination controls for search results
-            display_pagination_controls(len(search_results), st.session_state.current_page, st.session_state.movies_per_page)
+            display_pagination_controls(len(search_results), st.session_state.current_page, st.session_state.movies_per_page, "search_")
             
         else:
             st.warning(f"No movies found for '{search_term}'")
@@ -1138,7 +1138,7 @@ def main():
                 display_movie_card(movie, clickable=True, context=f"trending_{idx}")
         
         # Add pagination controls for trending movies
-        display_pagination_controls(len(trending_movies), st.session_state.current_page, st.session_state.movies_per_page)
+        display_pagination_controls(len(trending_movies), st.session_state.current_page, st.session_state.movies_per_page, "trending_")
     
     # Add recommendations section for users who have rated movies
     user_ratings = load_user_ratings()
