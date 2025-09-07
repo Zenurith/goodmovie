@@ -893,29 +893,34 @@ def display_movie_modal(movie, df):
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Show personalized recommendations based on progressive confidence
-    num_ratings = len([rating for rating in user_ratings.values() if rating > 0])
-    implicit_signals = calculate_implicit_signals()
-    collab_confidence = get_collaborative_confidence(num_ratings, implicit_signals)
-    
-    
-    if collab_confidence > 0.4:  # Dynamic threshold instead of hard 3-rating rule
-        st.markdown('<div class="recommendations-section" style="margin-top: 1rem;">', unsafe_allow_html=True)
-        st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 More Recommendations for You</h3>", unsafe_allow_html=True)
+    # Only show if user has rated this specific movie
+    if current_rating > 0:
+        num_ratings = len([rating for rating in user_ratings.values() if rating > 0])
+        implicit_signals = calculate_implicit_signals()
+        collab_confidence = get_collaborative_confidence(num_ratings, implicit_signals)
         
-        recommendations = get_hybrid_recommendations(df, user_ratings, 4)
-        
-        if not recommendations.empty:
-            rec_cols = st.columns(4)
-            for idx, (_, rec_movie) in enumerate(recommendations.iterrows()):
-                with rec_cols[idx]:
-                    display_movie_card(rec_movie, clickable=True, context=f"rec_{idx}")
-        else:
-            st.write("Rate more movies to get better recommendations!")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-    elif num_ratings > 0:
+        if collab_confidence > 0.4:  # Dynamic threshold instead of hard 3-rating rule
+            st.markdown('<div class="recommendations-section" style="margin-top: 1rem;">', unsafe_allow_html=True)
+            st.markdown("<h3 style='color: #ff4444; margin-bottom: 1rem;'>🎯 More Recommendations for You</h3>", unsafe_allow_html=True)
+            
+            recommendations = get_hybrid_recommendations(df, user_ratings, 4)
+            
+            if not recommendations.empty:
+                rec_cols = st.columns(4)
+                for idx, (_, rec_movie) in enumerate(recommendations.iterrows()):
+                    with rec_cols[idx]:
+                        display_movie_card(rec_movie, clickable=True, context=f"rec_{idx}")
+            else:
+                st.write("Rate more movies to get better recommendations!")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+        elif num_ratings > 0:
+            st.markdown('<div class="recommendations-section" style="margin-top: 1rem; text-align: center; padding: 1rem;">', unsafe_allow_html=True)
+            st.markdown(f"<p style='color: #ff4444; font-style: italic;'>Rate {3 - num_ratings} more movies to unlock personalized collaborative filtering recommendations!</p>", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        # Show message encouraging user to rate this movie first
         st.markdown('<div class="recommendations-section" style="margin-top: 1rem; text-align: center; padding: 1rem;">', unsafe_allow_html=True)
-        st.markdown(f"<p style='color: #ff4444; font-style: italic;'>Rate {3 - num_ratings} more movies to unlock personalized collaborative filtering recommendations!</p>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
     # Simple spacing at the bottom
