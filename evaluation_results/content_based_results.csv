@@ -1,0 +1,4 @@
+scenario,n_user_ratings,success,n_recommendations,avg_rating,mae_equivalent,genre_diversity,time_ms
+Pure Cold Start (0 ratings),0,True,10,7.81,2.1900000000000004,12,3473.9174842834473
+Minimal Data (1 rating),1,True,10,8.28,1.7200000000000006,13,3300.903797149658
+Few Ratings (3 ratings),3,True,10,8.250000000000002,1.7499999999999982,12,3436.9564056396484

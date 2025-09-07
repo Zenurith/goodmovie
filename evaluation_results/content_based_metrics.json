@@ -1,0 +1,8 @@
+{
+  "overall_success_rate": 1.0,
+  "pure_cold_start_success_rate": 1.0,
+  "avg_recommendation_quality": 8.113333333333335,
+  "avg_mae_equivalent": 1.8866666666666665,
+  "target_achieved": true,
+  "evaluation_timestamp": "2025-09-07T19:27:59.422350"
+}

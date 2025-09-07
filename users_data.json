@@ -743,10 +743,19 @@
       "created_at": "2025-09-06T23:33:55.884616",
       "last_login": "2025-09-06T23:33:55.884623",
       "total_movies_rated": 2
+    },
+    "sigma": {
+      "ratings": {
+        "372058": 9,
+        "378064": 9
+      },
+      "created_at": "2025-09-07T17:15:34.709380",
+      "last_login": "2025-09-07T17:17:51.833653",
+      "total_movies_rated": 2
     }
   },
   "metadata": {
-    "total_users": 53,
+    "total_users": 54,
     "created_at": "2025-09-04T22:04:55.841232"
   }
 }
