@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
-from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 import logging
@@ -16,7 +15,6 @@ class CollaborativeFilter:
         self.user_ratings = {}
         self.user_item_matrix = None
         self.item_similarity_matrix = None
-        self.svd_model = None
         self._users_data_cache = None
         self._similarity_cache = {}
         self._matrix_cache = {}
@@ -271,39 +269,6 @@ class CollaborativeFilter:
             logging.error(f"Error building item similarity matrix: {e}")
             return np.eye(len(self.df))  # Return identity matrix as fallback
     
-    def _build_svd_model(self, user_item_matrix: pd.DataFrame, n_components: int = 50):
-        """Build SVD model with improved handling."""
-        try:
-            if user_item_matrix.empty:
-                return False
-                
-            # Replace 0s with NaN for missing values
-            matrix_filled = user_item_matrix.copy()
-            matrix_filled = matrix_filled.replace(0, np.nan)
-            
-            # Fill NaN with user means, then global mean
-            for user_id in matrix_filled.index:
-                user_mean = matrix_filled.loc[user_id].mean()
-                if np.isnan(user_mean):
-                    user_mean = matrix_filled.stack().mean()  # Global mean
-                matrix_filled.loc[user_id] = matrix_filled.loc[user_id].fillna(user_mean)
-            
-            # Determine appropriate number of components
-            min_dim = min(matrix_filled.shape[0], matrix_filled.shape[1])
-            n_components = min(n_components, min_dim - 1, 20)
-            
-            if n_components < 2:
-                return False
-                
-            # Apply SVD
-            self.svd_model = TruncatedSVD(n_components=n_components, random_state=42)
-            self.svd_model.fit(matrix_filled.fillna(0))
-            
-            return True
-            
-        except Exception as e:
-            logging.error(f"Error building SVD model: {e}")
-            return False
     
     def get_recommendations(self, n_recommendations: int = 5, 
                           all_users_data: Optional[Dict[str, Dict[str, int]]] = None) -> pd.DataFrame:
@@ -547,50 +512,6 @@ class CollaborativeFilter:
             logging.error(f"Error in item-based recommendations: {e}")
             return pd.DataFrame()
     
-    def _get_svd_recommendations(self, n_recommendations: int) -> pd.DataFrame:
-        """
-        Get recommendations using SVD matrix factorization.
-        """
-        try:
-            if self.svd_model is None or self.user_item_matrix.empty:
-                return pd.DataFrame()
-                
-            current_user_id = "current_user"
-            if current_user_id not in self.user_item_matrix.index:
-                return pd.DataFrame()
-            
-            # Get user vector and predict ratings
-            user_vector = self.user_item_matrix.loc[current_user_id].values.reshape(1, -1)
-            user_latent = self.svd_model.transform(user_vector)
-            reconstructed = self.svd_model.inverse_transform(user_latent)[0]
-            
-            # Get unrated movies and their predicted ratings
-            movie_predictions = []
-            rated_movie_ids = set(self.user_ratings.keys())
-            
-            for i, movie_id in enumerate(self.user_item_matrix.columns):
-                if movie_id not in rated_movie_ids and i < len(reconstructed):
-                    predicted_rating = reconstructed[i]
-                    if predicted_rating > 6.0:
-                        movie_predictions.append((movie_id, predicted_rating))
-            
-            # Sort by predicted rating
-            movie_predictions.sort(key=lambda x: x[1], reverse=True)
-            
-            # Get movie data for recommendations
-            recommended_movies = []
-            for movie_id, pred_rating in movie_predictions[:n_recommendations]:
-                movie_row = self.df[self.df['id'].astype(str) == str(movie_id)]
-                if not movie_row.empty:
-                    movie_dict = movie_row.iloc[0].to_dict()
-                    movie_dict['svd_score'] = pred_rating
-                    recommended_movies.append(movie_dict)
-            
-            return pd.DataFrame(recommended_movies)
-            
-        except Exception as e:
-            logging.error(f"Error in SVD recommendations: {e}")
-            return pd.DataFrame()
     
     def _get_content_based_recommendations(self, n_recommendations: int) -> pd.DataFrame:
         """
@@ -674,113 +595,7 @@ class CollaborativeFilter:
             logging.error(f"Error in content-based recommendations: {e}")
             return self._get_fallback_recommendations(n_recommendations)
     
-    def _calculate_content_score(self, movie: pd.Series, top_genres: List[str], top_languages: List[str],
-                               genre_scores: Dict[str, float], language_scores: Dict[str, float], user_avg_rating: float) -> float:
-        """
-        Calculate improved content-based score.
-        """
-        try:
-            # Get movie genres and language
-            movie_genres = str(movie['genre']).split(',')
-            movie_genres = [g.strip() for g in movie_genres if g.strip()]
-            movie_language = str(movie.get('original_language', ''))
-            
-            if not movie_genres:
-                return 0.0
-            
-            # Genre matching score
-            genre_match_score = 0.0
-            for genre in movie_genres:
-                if genre in genre_scores:
-                    genre_match_score += genre_scores[genre] / 10.0  # Normalize
-            
-            if genre_match_score == 0:
-                return 0.0  # No genre match
-            
-            # Language bonus
-            language_bonus = 0.0
-            if movie_language in language_scores:
-                language_bonus = language_scores[movie_language] / 20.0  # Smaller weight
-            
-            # Quality scores
-            vote_avg = float(movie.get('vote_average', 0))
-            quality_score = vote_avg / 10.0
-            
-            # Popularity score (capped and normalized)
-            popularity = float(movie.get('popularity', 0))
-            popularity_score = min(popularity / 100.0, 1.0) * 0.3
-            
-            # Vote count bonus (prefer movies with more votes)
-            vote_count = float(movie.get('vote_count', 0))
-            vote_count_bonus = min(vote_count / 1000.0, 1.0) * 0.2
-            
-            # Rating alignment bonus
-            rating_bonus = 0.5 if vote_avg >= user_avg_rating else 0.0
-            
-            # Final score
-            total_score = (genre_match_score + language_bonus + quality_score + 
-                          popularity_score + vote_count_bonus + rating_bonus)
-            
-            return total_score
-            
-        except Exception:
-            return 0.0
     
-    def _combine_recommendations(self, rec_sources: List[tuple], n_recommendations: int) -> pd.DataFrame:
-        """
-        Combine recommendations from multiple sources with weighted scoring.
-        """
-        try:
-            movie_scores = {}
-            movie_data = {}
-            
-            for recs_df, weight in rec_sources:
-                if recs_df.empty:
-                    continue
-                    
-                for _, movie in recs_df.iterrows():
-                    movie_id = str(movie['id'])
-                    
-                    # Store movie data
-                    if movie_id not in movie_data:
-                        movie_data[movie_id] = movie.to_dict()
-                    
-                    # Calculate weighted score
-                    base_score = movie.get('vote_average', 5.0) / 10.0
-                    
-                    # Add method-specific scores if available
-                    method_score = 0
-                    if 'cf_score' in movie:
-                        method_score = movie['cf_score']
-                    elif 'item_score' in movie:
-                        method_score = movie['item_score'] * 5  # Scale up item scores
-                    elif 'svd_score' in movie:
-                        method_score = movie['svd_score']
-                    elif 'content_score' in movie:
-                        method_score = movie['content_score'] * 2  # Scale up content scores
-                    
-                    combined_score = (base_score + method_score) * weight
-                    
-                    if movie_id not in movie_scores:
-                        movie_scores[movie_id] = 0
-                    movie_scores[movie_id] += combined_score
-            
-            # Sort by combined score
-            sorted_movies = sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)
-            
-            # Create result DataFrame
-            recommended_movies = []
-            for movie_id, score in sorted_movies[:n_recommendations]:
-                if movie_id in movie_data:
-                    movie_dict = movie_data[movie_id].copy()
-                    movie_dict['combined_score'] = score
-                    recommended_movies.append(movie_dict)
-            
-            return pd.DataFrame(recommended_movies)
-            
-        except Exception as e:
-            logging.error(f"Error combining recommendations: {e}")
-            return pd.DataFrame()
     
     def _get_fallback_recommendations(self, n_recommendations: int) -> pd.DataFrame:
         """Get high-quality popular movies as fallback."""

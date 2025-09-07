@@ -1,6 +1,0 @@
-{
-  "similarity_time_per_user": 0.0009372234344482422,
-  "prediction_time_per_rating": 0.00391197681427002,
-  "recommendation_time_per_user": 2.65950878461202,
-  "matrix_memory_mb": 0.06806182861328125
-}

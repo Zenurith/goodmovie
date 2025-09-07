@@ -1132,7 +1132,7 @@ def main():
         
         if not search_results.empty:
             # Show enhanced search results header with TF-IDF indicator
-            results_text = f"🔍 Smart Search Results ({len(search_results)} movies found)"
+            results_text = f"Results ({len(search_results)} movies found)"
             if 'search_similarity' in search_results.columns:
                 avg_relevance = search_results['search_similarity'].mean() * 100
                 results_text += f" - Avg Relevance: {avg_relevance:.1f}%"
@@ -1141,7 +1141,6 @@ def main():
             
             # Show search method used
             search_method = "TF-IDF Content Search" if 'search_similarity' in search_results.columns else "Basic Text Search"
-            st.markdown(f'<p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">Using: {search_method} | Query: "{search_term}"</p>', unsafe_allow_html=True)
             
             # Paginate search results
             paginated_search = paginate_dataframe(search_results, st.session_state.current_page, st.session_state.movies_per_page)
@@ -1222,82 +1221,40 @@ def main():
                 with rec_cols[idx % 4]:
                     display_movie_card(rec_movie, clickable=True, context=f"home_rec_{idx}")
     
-    # Sidebar filters (only show if no search is active)
-    if not search_term:
-        st.sidebar.title("🎬 Filters")
+    # Sidebar profile (always show)
+    st.sidebar.title("🎬 My Profile")
+    
+    # User stats
+    user_stats = user_manager.get_user_stats(st.session_state.current_user)
+    if user_stats:
+        st.sidebar.metric("Movies Rated", user_stats.get('total_rated', 0))
+        if user_stats.get('total_rated', 0) > 0:
+            st.sidebar.metric("Average Rating", f"{user_stats.get('average_rating', 0.0)}/10")
+            st.sidebar.write(f"**Highest:** {user_stats.get('highest_rating', 0)}/10")
+            st.sidebar.write(f"**Lowest:** {user_stats.get('lowest_rating', 0)}/10")
         
-        # Genre filter
-        all_genres = set()
-        for genres in df['genre'].dropna():
-            all_genres.update([g.strip() for g in str(genres).split(',')])
+        st.sidebar.write(f"**Member since:** {user_stats.get('created_at', '')[:10]}")
+    
+    if rated_movies:
+        st.sidebar.markdown("---")
+        st.sidebar.write("**Recent Ratings:**")
+        # Show last 5 ratings
+        recent_ratings = dict(list(load_user_ratings().items())[-5:])
+        for movie_id, rating in recent_ratings.items():
+            movie_row = df[df['id'].astype(str) == str(movie_id)]
+            if not movie_row.empty:
+                movie_title = movie_row.iloc[0]['title']
+                st.sidebar.write(f"{'★' * rating} {movie_title[:20]}...")
         
-        selected_genre = st.sidebar.selectbox("Select Genre", ["All"] + sorted(list(all_genres)))
+        st.sidebar.markdown("---")
+        if st.sidebar.button("Clear All My Ratings"):
+            # Clear ratings for current user
+            for movie_id in list(load_user_ratings().keys()):
+                user_manager.remove_user_rating(st.session_state.current_user, movie_id)
+            st.rerun()
         
-        # Rating filter
-        min_rating = st.sidebar.slider("Minimum Rating", 0.0, 10.0, 0.0, 0.1)
-        
-        # Year filter
-        df['year'] = pd.to_datetime(df['release_date']).dt.year
-        min_year = st.sidebar.slider("From Year", int(df['year'].min()), int(df['year'].max()), int(df['year'].min()))
-        
-        # Apply filters
-        filtered_df = df.copy()
-        
-        if selected_genre != "All":
-            filtered_df = filtered_df[filtered_df['genre'].str.contains(selected_genre, na=False)]
-        
-        filtered_df = filtered_df[filtered_df['vote_average'] >= min_rating]
-        filtered_df = filtered_df[filtered_df['year'] >= min_year]
-        
-        if len(filtered_df) != len(df):
-            st.markdown('<div class="section-header">🔍 Filtered Results</div>', unsafe_allow_html=True)
-            
-            filtered_movies = filtered_df.nlargest(len(filtered_df), ['vote_average', 'popularity'])
-            
-            # Paginate filtered results
-            paginated_filtered = paginate_dataframe(filtered_movies, st.session_state.current_page, st.session_state.movies_per_page)
-            
-            cols4 = st.columns(4)
-            for idx, (_, movie) in enumerate(paginated_filtered.iterrows()):
-                with cols4[idx % 4]:
-                    display_movie_card(movie, clickable=True, context=f"filtered_{idx}")
-            
-            # Add pagination controls for filtered results
-            display_pagination_controls(len(filtered_movies), st.session_state.current_page, st.session_state.movies_per_page)
     else:
-        st.sidebar.title("🎬 My Profile")
-        
-        # User stats
-        user_stats = user_manager.get_user_stats(st.session_state.current_user)
-        if user_stats:
-            st.sidebar.metric("Movies Rated", user_stats.get('total_rated', 0))
-            if user_stats.get('total_rated', 0) > 0:
-                st.sidebar.metric("Average Rating", f"{user_stats.get('average_rating', 0.0)}/10")
-                st.sidebar.write(f"**Highest:** {user_stats.get('highest_rating', 0)}/10")
-                st.sidebar.write(f"**Lowest:** {user_stats.get('lowest_rating', 0)}/10")
-            
-            st.sidebar.write(f"**Member since:** {user_stats.get('created_at', '')[:10]}")
-        
-        if rated_movies:
-            st.sidebar.markdown("---")
-            st.sidebar.write("**Recent Ratings:**")
-            # Show last 5 ratings
-            recent_ratings = dict(list(load_user_ratings().items())[-5:])
-            for movie_id, rating in recent_ratings.items():
-                movie_row = df[df['id'].astype(str) == str(movie_id)]
-                if not movie_row.empty:
-                    movie_title = movie_row.iloc[0]['title']
-                    st.sidebar.write(f"{'★' * rating} {movie_title[:20]}...")
-            
-            st.sidebar.markdown("---")
-            if st.sidebar.button("Clear All My Ratings"):
-                # Clear ratings for current user
-                for movie_id in list(load_user_ratings().keys()):
-                    user_manager.remove_user_rating(st.session_state.current_user, movie_id)
-                st.rerun()
-            
-        else:
-            st.sidebar.write("No ratings yet. Click on movies to rate them!")
+        st.sidebar.write("No ratings yet. Click on movies to rate them!")
     
 
 if __name__ == "__main__":

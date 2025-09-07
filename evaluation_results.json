@@ -1,41 +1,70 @@
 {
-  "evaluation_summary": {
-    "dataset_info": {
-      "total_movies": 9985,
-      "total_users": 47,
-      "total_ratings": 351,
-      "sparsity": 99.92520695937523
-    },
-    "rating_prediction": {
-      "mae": 1.3648628168098438,
-      "rmse": 2.135245891483369,
-      "total_predictions": 80
-    },
-    "ranking_metrics": {
-      "5": {
-        "precision": 0.17948717948717952,
-        "recall": 0.41623931623931626,
-        "f1": 0.23369963369963373,
-        "ndcg": 0.32882465156425206,
-        "num_users": 39
-      },
-      "10": {
-        "precision": 0.12564102564102564,
-        "recall": 0.5443223443223444,
-        "f1": 0.19342608120888663,
-        "ndcg": 0.38400356216197445,
-        "num_users": 39
-      }
-    },
-    "coverage_diversity": {
-      "catalog_coverage": 0.015022533800701052,
-      "unique_movies_recommended": 150,
-      "avg_genre_diversity": 7.575
-    },
-    "user_similarity": {
-      "avg_similarity": NaN,
-      "max_similarity": 0.0,
-      "min_similarity": 0
-    }
+  "user_based": {
+    "total_recommendations": 22,
+    "average_rating": 1.0719811320754717,
+    "coverage": 18,
+    "unique_movies": [
+      "27205",
+      "429617",
+      "558",
+      "315635",
+      "324857",
+      "413594",
+      "299536",
+      "100402",
+      "155",
+      "299534",
+      "129",
+      "372058",
+      "572154",
+      "225745",
+      "533514",
+      "354912",
+      "634649",
+      "557"
+    ]
+  },
+  "item_based": {
+    "total_recommendations": 30,
+    "average_rating": 0.8728301886792451,
+    "coverage": 30,
+    "unique_movies": [
+      "407447",
+      "677638",
+      "637",
+      "58857",
+      "144",
+      "115929",
+      "586940",
+      "920394",
+      "28032",
+      "15080",
+      "12429",
+      "11948",
+      "618353",
+      "779047",
+      "122",
+      "864",
+      "105864",
+      "640344",
+      "238",
+      "33320",
+      "38142",
+      "1262",
+      "16305",
+      "808",
+      "1372",
+      "1585",
+      "278",
+      "100",
+      "290098",
+      "38985"
+    ]
+  },
+  "svd": {
+    "total_recommendations": 0,
+    "average_rating": 0,
+    "coverage": 0,
+    "unique_movies": []
   }
 }
