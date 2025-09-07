@@ -8,6 +8,7 @@ import os
 import time
 from datetime import datetime
 from algorithm import get_recommendations, get_content_based_recommendations
+from algorithm.collaborative_filtering import get_collaborative_confidence
 from algorithm.tfidf_content import search_movies_tfidf, create_tfidf_search_engine
 from user_manager import get_user_manager
 
@@ -283,22 +284,6 @@ def load_movie_data():
         st.error("Movies dataset not found. Please make sure 'dataset/movies.csv' exists.")
         return pd.DataFrame()
 
-@st.cache_data(ttl=3600)
-def get_filtered_movies(df, genre_filter=None, min_rating=0.0, min_year=None):
-    """Pre-filter movies for better performance"""
-    filtered_df = df.copy()
-    
-    if genre_filter and genre_filter != "All":
-        filtered_df = filtered_df[filtered_df['genre'].str.contains(genre_filter, na=False)]
-    
-    if min_rating > 0:
-        filtered_df = filtered_df[filtered_df['vote_average'] >= min_rating]
-    
-    if min_year:
-        filtered_df['year'] = pd.to_datetime(filtered_df['release_date'], errors='coerce').dt.year
-        filtered_df = filtered_df[filtered_df['year'] >= min_year]
-    
-    return filtered_df
 
 @st.cache_data(ttl=3600, max_entries=500)  # Cache for 1 hour, limit cache size
 def fetch_poster(movie_id):
@@ -317,13 +302,6 @@ def fetch_poster(movie_id):
     except Exception as e:
         return "https://via.placeholder.com/400x600/333333/ffffff?text=No+Poster"
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
-def fetch_multiple_posters(movie_ids):
-    """Batch fetch posters for multiple movies"""
-    posters = {}
-    for movie_id in movie_ids:
-        posters[movie_id] = fetch_poster(movie_id)
-    return posters
 
 def load_user_ratings():
     """Load ratings for the current logged-in user"""
@@ -392,32 +370,6 @@ def calculate_implicit_signals():
         implicit_signals[movie_id] += 0.5  # Moderate interest
     
     return implicit_signals
-
-def get_collaborative_confidence(num_ratings, implicit_signals=None):
-    """Calculate confidence score for collaborative filtering"""
-    if num_ratings == 0:
-        return 0.0
-    elif num_ratings == 1:
-        base_confidence = 0.2
-    elif num_ratings == 2:
-        base_confidence = 0.4
-    else:
-        base_confidence = min(0.8 + (num_ratings - 3) * 0.05, 1.0)
-    
-    # Boost confidence with implicit signals
-    if implicit_signals:
-        implicit_boost = min(len(implicit_signals) * 0.1, 0.3)
-        base_confidence = min(base_confidence + implicit_boost, 1.0)
-    
-    return base_confidence
-
-def save_user_ratings(ratings):
-    """Save ratings for the current logged-in user"""
-    if 'current_user' not in st.session_state or not st.session_state.current_user:
-        return
-    
-    # This function is kept for compatibility, but individual ratings are saved differently now
-    pass
 
 def save_user_rating(movie_id, rating):
     """Save a single rating for the current user"""
@@ -492,45 +444,7 @@ def get_search_suggestions(df, partial_query, max_suggestions=5):
         
         return suggestions
 
-def collaborative_filtering_recommendations(df, user_ratings, n_recommendations=5):
-    """
-    Wrapper function for the collaborative filtering algorithm.
-    
-    Args:
-        df: Movie dataframe
-        user_ratings: Dictionary of user ratings
-        n_recommendations: Number of recommendations to return
-        
-    Returns:
-        DataFrame with recommended movies
-    """
-    return get_recommendations(df, user_ratings, n_recommendations)
 
-def get_content_based_recommendations_with_implicit(df, user_ratings, implicit_signals, n_recommendations=10):
-    """
-    Get content-based recommendations enhanced with implicit signals from session data.
-    
-    Args:
-        df: Movie dataframe  
-        user_ratings: Dictionary of explicit user ratings
-        implicit_signals: Dictionary of implicit signals from session
-        n_recommendations: Number of recommendations to return
-        
-    Returns:
-        DataFrame with recommended movies
-    """
-    # Combine explicit ratings with implicit signals
-    combined_ratings = user_ratings.copy()
-    
-    # Add implicit signals as pseudo-ratings (scaled to 1-10 range)
-    for movie_id, signal_strength in implicit_signals.items():
-        if movie_id not in combined_ratings:
-            # Convert signal strength to rating scale (signals are 0.2-0.5, convert to 5-7 rating)
-            pseudo_rating = min(10, max(5, int(signal_strength * 10) + 5))
-            combined_ratings[movie_id] = pseudo_rating
-    
-    # Use enhanced ratings for content-based recommendations
-    return get_content_based_recommendations(df, combined_ratings, n_recommendations)
 
 def get_hybrid_recommendations(df, user_ratings, n_recommendations=10):
     """
